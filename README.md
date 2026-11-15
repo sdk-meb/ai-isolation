@@ -1,5 +1,5 @@
-# ai-isolation-setup
-
+# ai-isolation-setup 
+##### [العربية](./README.ar.md)
 A sandbox for AI coding tools on Debian/Wayland. It covers CLIs and desktop apps: Claude Code, Copilot CLI, Cursor, and anything you add later.
 
 - **Root setup is preferred, not required.**
