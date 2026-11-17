@@ -166,62 +166,8 @@ for w in "$PROJECT" "${T_RW[@]}" "${T_RWFILE[@]}"; do
 done
 
 # --- never expose well-known secrets, whatever tools.conf says ---------------
-# This list lives in the program (root-owned in a root install), not in the
-# config, so another program running as you can't widen it by editing
-# tools.conf. Paths are resolved first, so a symlink to ~/.ssh doesn't help.
-# It is a list of KNOWN token/key locations, not a complete one: a tool that
-# keeps its token somewhere else is not covered. Extend it (or loosen it) in
-# /etc/ai-sandbox/secrets.conf, which only root can edit.
-SECRETS=(
-  # keys, password stores, git/http credentials
-  "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.password-store" "$HOME/.pki"
-  "$HOME/.netrc" "$HOME/.git-credentials" "$HOME/.local/share/keyrings"
-  "$HOME/.config/op" "$HOME/.config/Bitwarden" "$HOME/.config/Bitwarden CLI"
-  # cloud + infrastructure
-  "$HOME/.aws" "$HOME/.azure" "$HOME/.config/gcloud" "$HOME/.oci" "$HOME/.kube"
-  "$HOME/.docker" "$HOME/.config/doctl" "$HOME/.config/hcloud" "$HOME/.terraform.d"
-  "$HOME/.vault-token" "$HOME/.config/rclone"
-  # developer tokens
-  "$HOME/.config/gh" "$HOME/.config/hub" "$HOME/.config/glab-cli"
-  "$HOME/.config/github-copilot" "$HOME/.npmrc" "$HOME/.yarnrc.yml" "$HOME/.pypirc"
-  "$HOME/.cargo/credentials" "$HOME/.cargo/credentials.toml" "$HOME/.gem/credentials"
-  # (~/.config/Code is not here: it is an editor's data dir, guarded by the
-  # per-tool isolation check like ~/.claude or ~/.config/Cursor)
-  # browsers + mail (Firefox family, Chromium family)
-  "$HOME/.mozilla" "$HOME/.thunderbird" "$HOME/.config/google-chrome"
-  "$HOME/.config/chromium" "$HOME/.config/BraveSoftware" "$HOME/.config/microsoft-edge"
-  "$HOME/.config/vivaldi" "$HOME/.config/opera"
-  # ALL snap and Flatpak app data (their browsers keep profiles there)
-  "$HOME/snap" "$HOME/.var/app"
-)
-# Admin additions/exceptions, one per line:  deny PATH   |   allow PATH
-# (~ = the user's home). Only used if root-owned and not group/world-writable.
-SECRETS_CONF=/etc/ai-sandbox/secrets.conf
-if [[ -f $SECRETS_CONF ]]; then
-  read -r s_owner s_mode < <(stat -c '%u %a' "$SECRETS_CONF")
-  if (( s_owner == 0 && (8#$s_mode & 8#022) == 0 )); then
-    while read -r verb path; do
-      [[ -n $verb ]] || continue
-      path=$(expand_home "$(trim "$path")")
-      case $verb in
-        deny)  SECRETS+=("$path") ;;
-        allow) keep=(); for s in "${SECRETS[@]}"; do [[ $s == "$path" ]] || keep+=("$s"); done
-               SECRETS=("${keep[@]}") ;;
-        *)     warn "$SECRETS_CONF: unknown word '$verb' (use deny or allow)" ;;
-      esac
-    done < <(sed 's/#.*//' "$SECRETS_CONF")
-  else
-    warn "$SECRETS_CONF ignored: it must be root-owned and not group/world-writable"
-  fi
-fi
-touches_secret() {     # touches_secret PATH -> prints the secret it would expose
-  local w s
-  w=$(readlink -m -- "$1")
-  for s in "${SECRETS[@]}"; do
-    if [[ $w == "$s" || $w == "$s"/* || $s == "$w"/* ]]; then echo "$s"; return 0; fi
-  done
-  return 1
-}
+# The list is in lib.sh (root-owned in a root install, never visible inside).
+secrets_load            # SECRETS=(...) from lib.sh + /etc/ai-sandbox/secrets.conf
 for w in "$PROJECT" "${T_RW[@]}" "${T_RWFILE[@]}" "${T_RO[@]}"; do
   if s=$(touches_secret "$w"); then die "[$NAME] '$w' would expose $s inside the sandbox — refusing"; fi
 done

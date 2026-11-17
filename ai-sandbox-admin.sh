@@ -462,6 +462,168 @@ cmd_uninstall() {
 # -----------------------------------------------------------------------------
 # add: interactive
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# add, step 3: find a tool's config/state in your home, rate each candidate,
+# and let you pick exactly what it may see.
+# -----------------------------------------------------------------------------
+name_aliases() {   # name_aliases QUERY NAME -> extra names known to be used (or '-')
+  case "$1 $2" in
+    *code*|*vscode*) echo "vscode Code" ;;
+    *copilot*)       echo "copilot" ;;
+    *cursor*)        echo "cursor" ;;
+    *)               echo "-" ;;
+  esac
+}
+
+# home_candidates NAME...  ->  paths (one per line) in the usual config/state
+# places whose name contains one of NAMEs (case-insensitive)
+home_candidates() {
+  local n
+  for n in "$@"; do
+    [[ -n $n ]] || continue
+    find "$HOME" "$HOME/.config" "$HOME/.local/share" "$HOME/.local/state" "$HOME/.cache" \
+         -mindepth 1 -maxdepth 1 -iname "*$n*" ! -iname 'ai-sandbox*' 2>/dev/null
+  done | sort -u
+}
+
+# rate_path PATH NAME...  ->  sets R_KIND (dir|file|link?) R_SCORE (0-5)
+#   R_WHY (one-line hint) R_DEF (w|r|f|n suggested) R_LOCK (non-empty = can't add)
+rate_path() {
+  local p=$1 base loc exact=no n o owner op rp
+  shift
+  R_LOCK="" R_DEF=n R_SCORE=0
+  if   [[ -d $p ]]; then R_KIND=dir
+  elif [[ -f $p ]]; then R_KIND=file
+  elif [[ -e $p || -L $p ]]; then R_KIND=other
+  else R_KIND=missing; fi
+
+  # never allowed: a known secret, or another tool's data (checked first, so
+  # a path that doesn't exist yet is refused too)
+  if o=$(touches_secret "$p"); then
+    R_SCORE=0 R_LOCK=x R_WHY="SECRET ($(tildify "$o")) - never visible inside"; return 0
+  fi
+  rp=$(readlink -m -- "$p")
+  while IFS=$'\t' read -r owner op; do
+    op=$(readlink -m -- "$op")
+    if [[ $rp == "$op" || $rp == "$op"/* || $op == "$rp"/* ]]; then
+      R_SCORE=0 R_LOCK=x R_WHY="data of [$owner] - a tool may only see its own"; return 0
+    fi
+  done < <(conf_data_paths "$TOOLS")
+  case $R_KIND in
+    missing) R_WHY="does not exist yet"; R_LOCK=missing; return 0 ;;
+    other)   R_WHY="dangling symlink or special file"; R_LOCK=x; return 0 ;;
+  esac
+
+  base=$(basename "$p" | tr 'A-Z' 'a-z'); base=${base#.}; base=${base%.*}
+  for n in "$@"; do
+    n=$(tr 'A-Z' 'a-z' <<<"$n")
+    if [[ $base == "$n" ]]; then exact=yes; fi
+  done
+  case $(dirname "$p") in
+    "$HOME/.cache")       loc=cache ;;
+    "$HOME/.local/state") loc=state ;;
+    "$HOME/.local/share") loc=share ;;
+    "$HOME/.config")      loc=config ;;
+    *)                    loc=home ;;
+  esac
+
+  if [[ $exact == no ]]; then
+    R_SCORE=1 R_WHY="name only CONTAINS it: probably another program - check"
+    [[ $loc == cache ]] && R_SCORE=0
+    return 0
+  fi
+  case $loc/$R_KIND in
+    config/dir)          R_SCORE=5 R_DEF=w R_WHY="main config: settings, login, extensions" ;;
+    home/dir) if [[ $(basename "$p") == .* ]]; then
+                R_SCORE=5 R_DEF=w R_WHY="main config: settings, login, extensions"
+              else
+                R_SCORE=2 R_DEF=n R_WHY="plain folder in your home (projects?), not config - check"
+              fi ;;
+    home/file|config/file) R_SCORE=4 R_DEF=f R_WHY="config file: settings/login (lost each run if skipped)" ;;
+    share/*)             R_SCORE=4 R_DEF=w R_WHY="app data (history, models, state)" ;;
+    state/*)             R_SCORE=3 R_DEF=w R_WHY="state/logs: works without, forgets between runs" ;;
+    cache/*)             R_SCORE=2 R_DEF=n R_WHY="cache: optional, rebuilt each run if skipped" ;;
+  esac
+  [[ $R_KIND == file && $R_DEF == w ]] && R_DEF=f
+  return 0
+}
+
+stars() { local s="" i; for ((i = 1; i <= 5; i++)); do if (( i <= $1 )); then s+="#"; else s+="."; fi; done; printf '%s' "$s"; }
+
+# pick_home_paths NAME...  ->  fills rw ro rwfile (of the caller, add step 3)
+pick_home_paths() {
+  local -a cand=() kinds=() scores=() whys=() defs=() locks=() order=()
+  local c i k ans hint def
+  secrets_load
+  mapfile -t cand < <(home_candidates "$@")
+  for c in "${cand[@]}"; do
+    rate_path "$c" "$@"
+    kinds+=("$R_KIND") scores+=("$R_SCORE") whys+=("$R_WHY") defs+=("$R_DEF") locks+=("$R_LOCK")
+  done
+  # most important first
+  mapfile -t order < <(for i in "${!cand[@]}"; do printf '%s %s\n' "${scores[i]}" "$i"; done | sort -k1,1nr -k2,2n | cut -d' ' -f2)
+
+  echo
+  if (( ${#cand[@]} == 0 )); then
+    echo "Nothing in your home matches: $*"
+  else
+    echo "Found in your home (importance 5 = it won't work right without it):"
+    echo "   #  type  importance   path"
+    k=1
+    for i in "${order[@]}"; do
+      case ${defs[i]} in w) def="read-write" ;; f) def="read-write file" ;; r) def="read-only" ;; *) def="skip" ;; esac
+      [[ -z ${locks[i]} ]] || def="BLOCKED"
+      printf '  %2d  %-4s  %s %d/5    %s%s\n' "$k" "${kinds[i]}" "$(stars "${scores[i]}")" "${scores[i]}" \
+             "$(tildify "${cand[i]}")" "$([[ ${kinds[i]} == dir ]] && echo /)"
+      printf '                           %s  -> suggested: %s\n' "${whys[i]}" "$def"
+      k=$((k + 1))
+    done
+    echo
+    if ask_yn "Use the suggested answers?" y; then
+      for i in "${order[@]}"; do
+        [[ -z ${locks[i]} ]] || continue
+        case ${defs[i]} in
+          w) rw+=("$(tildify "${cand[i]}")") ;; r) ro+=("$(tildify "${cand[i]}")") ;;
+          f) rwfile+=("$(tildify "${cand[i]}")") ;;
+        esac
+      done
+    else
+      for i in "${order[@]}"; do
+        c=$(tildify "${cand[i]}")
+        if [[ -n ${locks[i]} ]]; then echo "  $c  skipped: ${whys[i]}"; continue; fi
+        def=${defs[i]}; [[ $def == f ]] && def=w
+        if [[ ${kinds[i]} == dir ]]; then hint="w=read-write r=read-only n=skip"
+        else hint="w=read-write n=skip"; fi
+        ans=$(ask "  $c$([[ ${kinds[i]} == dir ]] && echo /) [${kinds[i]} ${scores[i]}/5] $hint" "$def")
+        case ${kinds[i]}/$ans in
+          dir/w*)  rw+=("$c") ;;
+          dir/r*)  ro+=("$c") ;;
+          file/w*) rwfile+=("$c") ;;
+        esac
+      done
+    fi
+  fi
+
+  # anything the search can't guess (e.g. a folder nested somewhere else)
+  local x p
+  while :; do
+    x=$(ask "Add another path by hand? (path, or '-' = done)" "-")
+    [[ $x == - ]] && break
+    p=$(expand_home "$x")
+    [[ $p == /* ]] || { echo "  use a full path (or ~/...)"; continue; }
+    rate_path "$p" "$@"
+    if [[ $R_LOCK == missing ]]; then
+      echo "  $x does not exist yet: it will be created as a folder at the first run"
+    elif [[ -n $R_LOCK ]]; then echo "  refused: $R_WHY"; continue; fi
+    if [[ -f $p ]]; then
+      ask_yn "  $x is a file: read-write?" y && rwfile+=("$(tildify "$p")")
+    else
+      ans=$(ask "  $x/ w=read-write r=read-only" w)
+      case $ans in w*) rw+=("$(tildify "$p")") ;; r*) ro+=("$(tildify "$p")") ;; esac
+    fi
+  done
+}
+
 cmd_add() {
   need_user
   runner >/dev/null || die "not installed yet: run 'ai-sandbox-admin install' (as root preferred)"
@@ -565,21 +727,16 @@ cmd_add() {
   ask_yn "Move these and put the wrappers in their place?" y || { echo "cancelled"; return 0; }
 
   # --- 3. its own config / state in your home -------------------------------
-  local -a ro=() rw=() rwfile=()
-  local c rel ans
+  # Everything in your home is INVISIBLE inside (home is an empty tmpfs that
+  # is thrown away after each run). Only what you pick here is kept.
+  local -a ro=() rw=() rwfile=() names=()
+  local c rel ans more
   echo
-  echo "Things in your home that look like '$q' (its config/state):"
-  while IFS= read -r c; do
-    rel=$(tildify "$c")
-    if [[ -d $c ]]; then
-      ans=$(ask "  $rel/   w=read-write r=read-only n=skip" w)
-      case $ans in w*) rw+=("$rel") ;; r*) ro+=("$rel") ;; esac
-    else
-      ans=$(ask "  $rel   w=read-write n=skip" w)
-      case $ans in w*) rwfile+=("$rel") ;; esac
-    fi
-  done < <(find "$HOME" "$HOME/.config" "$HOME/.local/share" "$HOME/.cache" \
-                -mindepth 1 -maxdepth 1 -iname "*$q*" ! -name 'ai-sandbox*' 2>/dev/null | sort)
+  echo "Its files in your home may use other names (e.g. VS Code: code -> ~/.vscode)."
+  more=$(ask "Other names to search for, space-separated ('-' = none)" "$(name_aliases "$q" "$name")")
+  names=("$q"); [[ $name == "$q" ]] || names+=("$name")
+  [[ $more == - ]] || { read -ra x <<<"$more"; names+=("${x[@]}"); }
+  pick_home_paths "${names[@]}"
 
   # program installed inside your home: its folder must be visible (read-only).
   # - an npm package needs its WHOLE package folder (vendor/, node_modules/),

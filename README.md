@@ -152,7 +152,19 @@ claude                   # sandboxed
 1. **Which program.** It searches `/usr/bin`, `/usr/sbin`, `/usr/local/bin`, `/usr/games`, `/opt`, `/usr/share`, `/usr/lib`, `/snap/bin`, plus your `~/.local/bin`, `~/.local/share`, `~/Applications`, `~/bin`, and the npm/bun/cargo/deno bin dirs. You pick one or more results by number (`4`, or `4 3` / `4,3`), or type one or more paths. **The first one is the main program.** Pick several when one tool has several programs, e.g. Devin's CLI script `/usr/share/devin-desktop/bin/devin-desktop` and its app binary `/usr/share/devin-desktop/devin-desktop`: each one gets its own wrapper and all of them run in the same `[section]`. If you pick a symlink and also its target (`/usr/bin/devin-desktop` → `…/bin/devin-desktop`), only the target is wrapped: the symlink already leads to that wrapper. `.desktop` files are not listed as programs.
 2. **Profile name** (its `[section]`), plus **type**: `cli` or `gui`. It guesses `gui` if a menu launcher matches or the app is Electron.
 3. **Project folder:** `cwd` for CLIs, `~/Workspace` for GUIs by default.
-4. **Your entries whose name contains the search term.** It looks directly inside `~`, `~/.config`, `~/.local/share` and `~/.cache`. For each folder: read-write, read-only, or skip. For each file: read-write or skip.
+4. **Its files in your home, rated.** First it asks for **other names** its files may use (VS Code: `code` → also `vscode`, `Code`; a hint is pre-filled for known tools). It looks directly inside `~`, `~/.config`, `~/.local/share`, `~/.local/state` and `~/.cache` and shows every match as a table, most important first:
+   ```
+      #  type  importance   path
+      1  dir   ##### 5/5    ~/.copilot/
+                              main config: settings, login, extensions  -> suggested: read-write
+      2  file  ####. 4/5    ~/.copilot.json
+                              config file: settings/login (lost each run if skipped)  -> suggested: read-write file
+      3  dir   ###.. 3/5    ~/.local/state/copilot/
+                              state/logs: works without, forgets between runs  -> suggested: read-write
+      4  dir   ..... 0/5    ~/.config/github-copilot/
+                              SECRET (~/.config/github-copilot) - never visible inside  -> suggested: BLOCKED
+   ```
+   Importance: **5** main config dir (`~/.<name>`, `~/.config/<Name>`), **4** config file or `~/.local/share/<name>`, **3** `~/.local/state`, **2** cache (rebuilt each run if skipped) or a plain non-dot folder, **1** the name only *contains* the term (probably another program), **0** blocked. Anything you skip is gone after each run, because `$HOME` inside is an empty tmpfs. **Blocked** entries can't be picked: a known secret (the same list the launcher uses) or another tool's data. Answer **Enter** to take all suggestions, or **n** to decide each one (folder: `w` read-write / `r` read-only / `n` skip; file: `w` / `n`). Then you can **add paths by hand** (e.g. a folder nested elsewhere). Those are checked the same way, and a path that doesn't exist yet is created at the first run.
 5. **The move.** Prefix for the real program (default `.ai-real-`), then a confirmation: `<path>` → `<dir>/.ai-real-<name>`, wrapper at `<path>`, for each picked program. How it moves:
    - a file **owned by a Debian package** → `dpkg-divert --rename` (with sudo), so package upgrades go to `.ai-real-<name>`;
    - any other file in a folder you can't write → `sudo mv`;

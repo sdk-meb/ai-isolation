@@ -1,2 +1,5 @@
 .marscode/
 tmp/
+.codex/
+.aws/
+.agents/
