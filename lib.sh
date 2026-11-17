@@ -91,59 +91,131 @@ conf_load() {
 # =============================================================================
 # Secrets that are never exposed inside the sandbox, whatever tools.conf says.
 # Used by the launcher (refuses) and by `ai-sandbox-admin add` (hints).
-# This list lives in the program (root-owned in a root install), not in the
-# config, so another program running as you can't widen it by editing
-# tools.conf. Paths are resolved first, so a symlink to ~/.ssh doesn't help.
-# It is a list of KNOWN token/key locations, not a complete one: a tool that
-# keeps its token somewhere else is not covered. Extend it (or loosen it) in
-# /etc/ai-sandbox/secrets.conf, which only root can edit.
+#   <lib>/secrets.list            the built-in list (data, not code), installed
+#                                 root-owned 644 next to lib.sh
+#   /etc/ai-sandbox/secrets.conf  admin additions/exceptions (root-owned;
+#                                 created empty by a root install)
+#   ~/.config/ai-sandbox/secrets.conf  your own additions (created by sync):
+#                                 root install: 'deny' only (it is yours, so
+#                                 it may only ADD secrets); user install:
+#                                 'deny' and 'allow'
+# All are only trusted if safe: see secrets_file_safe. FAIL CLOSED: if the
+# list is missing, unsafe, empty or has a line we don't understand, nothing
+# starts (a missing list must never mean "no secrets").
 # =============================================================================
-# secrets_load  ->  fills SECRETS (global array)
-secrets_load() {
-  local verb path s s_owner s_mode
+SECRETS_ROOT_LIB=/usr/local/lib/ai-sandbox
+SECRETS_CONF=/etc/ai-sandbox/secrets.conf
+SECRETS_USER_CONF=${XDG_CONFIG_HOME:-$HOME/.config}/ai-sandbox/secrets.conf
+
+# secrets_file_safe FILE STRICT  ->  prints why FILE can't be trusted (exit 1),
+# or nothing (exit 0). Safe = a regular file (after resolving symlinks), owned
+# by root (STRICT=yes) or by root/you (STRICT=no), not group/world-writable,
+# and so is every folder above it (a sticky root-owned folder like /tmp is ok).
+secrets_file_safe() {
+  local f d owner mode ok_owner
+  f=$(readlink -f -- "$1" 2>/dev/null) || { echo "$1: cannot resolve"; return 1; }
+  [[ -f $f ]] || { echo "$1: missing or not a regular file"; return 1; }
+  d=$f
+  while :; do
+    read -r owner mode < <(stat -c '%u %a' -- "$d") || { echo "$d: cannot stat"; return 1; }
+    ok_owner=no
+    if (( owner == 0 )); then ok_owner=yes
+    elif [[ $2 == no ]] && (( owner == EUID )); then ok_owner=yes; fi
+    [[ $ok_owner == yes ]] || { echo "$d is owned by uid $owner, not root"; return 1; }
+    if (( (8#$mode & 8#022) != 0 )); then
+      if [[ -d $d ]] && (( (8#$mode & 8#1000) != 0 && owner == 0 )); then :   # sticky root dir
+      else echo "$d is writable by group/others (mode $mode)"; return 1; fi
+    fi
+    [[ $d == / ]] && break
+    d=$(dirname -- "$d")
+  done
+  return 0
+}
+
+# secrets_parse FILE WORDS  ->  applies "deny PATH" / "allow PATH" lines of
+# FILE to SECRETS. WORDS = the words FILE may use ("deny" or "deny allow").
+# Any other line is an error (exit 1, message on stderr).
+secrets_parse() {
+  local file=$1 words=" $2 " n=0 line verb path s
   local -a keep
-  SECRETS=(
-    # keys, password stores, git/http credentials
-    "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.password-store" "$HOME/.pki"
-    "$HOME/.netrc" "$HOME/.git-credentials" "$HOME/.local/share/keyrings"
-    "$HOME/.config/op" "$HOME/.config/Bitwarden" "$HOME/.config/Bitwarden CLI"
-    # cloud + infrastructure
-    "$HOME/.aws" "$HOME/.azure" "$HOME/.config/gcloud" "$HOME/.oci" "$HOME/.kube"
-    "$HOME/.docker" "$HOME/.config/doctl" "$HOME/.config/hcloud" "$HOME/.terraform.d"
-    "$HOME/.vault-token" "$HOME/.config/rclone"
-    # developer tokens
-    "$HOME/.config/gh" "$HOME/.config/hub" "$HOME/.config/glab-cli"
-    "$HOME/.config/github-copilot" "$HOME/.npmrc" "$HOME/.yarnrc.yml" "$HOME/.pypirc"
-    "$HOME/.cargo/credentials" "$HOME/.cargo/credentials.toml" "$HOME/.gem/credentials"
-    # (~/.config/Code is not here: it is an editor's data dir, guarded by the
-    # per-tool isolation check like ~/.claude or ~/.config/Cursor)
-    # browsers + mail (Firefox family, Chromium family)
-    "$HOME/.mozilla" "$HOME/.thunderbird" "$HOME/.config/google-chrome"
-    "$HOME/.config/chromium" "$HOME/.config/BraveSoftware" "$HOME/.config/microsoft-edge"
-    "$HOME/.config/vivaldi" "$HOME/.config/opera"
-    # ALL snap and Flatpak app data (their browsers keep profiles there)
-    "$HOME/snap" "$HOME/.var/app"
-  )
-  # Admin additions/exceptions, one per line:  deny PATH   |   allow PATH
-  # (~ = the user's home). Only used if root-owned and not group/world-writable.
-  SECRETS_CONF=/etc/ai-sandbox/secrets.conf
-  if [[ -f $SECRETS_CONF ]]; then
-    read -r s_owner s_mode < <(stat -c '%u %a' "$SECRETS_CONF")
-    if (( s_owner == 0 && (8#$s_mode & 8#022) == 0 )); then
-      while read -r verb path; do
-        [[ -n $verb ]] || continue
-        path=$(expand_home "$(trim "$path")")
-        case $verb in
-          deny)  SECRETS+=("$path") ;;
-          allow) keep=(); for s in "${SECRETS[@]}"; do [[ $s == "$path" ]] || keep+=("$s"); done
-                 SECRETS=("${keep[@]}") ;;
-          *)     warn "$SECRETS_CONF: unknown word '$verb' (use deny or allow)" ;;
-        esac
-      done < <(sed 's/#.*//' "$SECRETS_CONF")
+  while IFS= read -r line || [[ -n $line ]]; do
+    n=$((n + 1))
+    line=$(trim "${line%%#*}")
+    [[ -n $line ]] || continue
+    verb=${line%%[[:space:]]*}
+    path=$(trim "${line#"$verb"}")
+    if [[ $words != *" $verb "* || -z $path ]]; then
+      echo "ai-sandbox: $file line $n: not understood: '$line' (use:${words% })" >&2; return 1
+    fi
+    path=$(expand_home "$path")
+    [[ $path == /* ]] || { echo "ai-sandbox: $file line $n: '$path' is not a full path (use ~/... or /...)" >&2; return 1; }
+    case $verb in
+      deny)  SECRETS+=("$path") ;;
+      allow) keep=(); for s in "${SECRETS[@]}"; do [[ $s == "$path" ]] || keep+=("$s"); done
+             SECRETS=("${keep[@]}") ;;
+    esac
+  done < "$file"
+}
+
+# secrets_load LIBDIR  ->  fills SECRETS (global array), or dies.
+# STRICT (only root may own the files) for a root install; a user install or
+# the source folder may also be owned by you (and so is NOT protected).
+secrets_load() {
+  local lib=$1 strict=no why
+  [[ $(readlink -m -- "$lib") == "$SECRETS_ROOT_LIB" ]] && strict=yes
+  SECRETS=()
+  why=$(secrets_file_safe "$lib/secrets.list" "$strict") \
+    || die "refusing to start: the secrets list can't be trusted: $why (reinstall: bash install.sh)"
+  secrets_parse "$lib/secrets.list" deny || die "refusing to start: fix $lib/secrets.list"
+  (( ${#SECRETS[@]} )) || die "refusing to start: $lib/secrets.list has no 'deny' lines"
+  # yours first, the admin's last: /etc has the final word
+  if [[ -e $SECRETS_USER_CONF || -L $SECRETS_USER_CONF ]]; then
+    why=$(secrets_file_safe "$SECRETS_USER_CONF" no) \
+      || die "refusing to start: $SECRETS_USER_CONF can't be trusted: $why (chmod 600 it)"
+    if [[ $strict == yes ]]; then
+      secrets_parse "$SECRETS_USER_CONF" deny \
+        || die "refusing to start: fix $SECRETS_USER_CONF (root install: it may only add 'deny' lines; exceptions go in $SECRETS_CONF)"
     else
-      warn "$SECRETS_CONF ignored: it must be root-owned and not group/world-writable"
+      secrets_parse "$SECRETS_USER_CONF" "deny allow" || die "refusing to start: fix $SECRETS_USER_CONF"
     fi
   fi
+  if [[ -e $SECRETS_CONF || -L $SECRETS_CONF ]]; then
+    why=$(secrets_file_safe "$SECRETS_CONF" yes) \
+      || die "refusing to start: $SECRETS_CONF can't be trusted: $why (it must be root-owned, not group/world-writable)"
+    secrets_parse "$SECRETS_CONF" "deny allow" || die "refusing to start: fix $SECRETS_CONF"
+  fi
+  return 0
+}
+
+# secrets_conf_template etc|user-root|user  ->  the commented starting text of
+# a secrets.conf (no rules: an untouched template changes nothing)
+secrets_conf_template() {
+  local words="deny PATH | allow PATH"
+  [[ $1 == user-root ]] && words="deny PATH"
+  printf '%s\n' \
+    "# secrets.conf — your own additions to the built-in secrets list" \
+    "# (<lib>/secrets.list, replaced on every reinstall; this file never is)." \
+    "# Paths here are NEVER visible inside the sandbox, whatever tools.conf says." \
+    "#" \
+    "# One rule per line:  $words      (~ = the home of whoever runs the tool)" \
+    "#   deny ~/.config/mytool     hide this too"
+  case $1 in
+    etc)  printf '%s\n' "#   allow ~/.pki              un-hide a built-in entry (exact path only)" \
+            "#" "# Must stay root-owned and not group/world-writable, or NO tool starts." ;;
+    user) printf '%s\n' "#   allow ~/.pki              un-hide a built-in entry (exact path only)" \
+            "#" "# User install: this file is yours, so anything running as you can edit it." ;;
+    user-root) printf '%s\n' "#" "# Root install: this file is yours, so it may only ADD secrets ('deny')." \
+            "# To un-hide a built-in entry, ask root to put 'allow PATH' in $SECRETS_CONF." ;;
+  esac
+  printf '%s\n' "# If this file has a line it doesn't understand, NO tool starts." ""
+}
+
+# ensure_secrets_conf FILE KIND MODE  ->  creates FILE from the template if it
+# doesn't exist yet (never overwrites: it is yours)
+ensure_secrets_conf() {
+  [[ -e $1 || -L $1 ]] && return 0
+  secrets_conf_template "$2" | act_write "$1" "$3" || return 1
+  echo "created:    $1" >&2
 }
 
 touches_secret() {     # touches_secret PATH -> prints the secret it would expose
@@ -216,6 +288,9 @@ ensure_conf() {
       echo "created:    $conf/$f" >&2
     fi
   done
+  local kind=user
+  [[ $(readlink -m -- "$defs") == "$SECRETS_ROOT_LIB" ]] && kind=user-root
+  ensure_secrets_conf "$conf/secrets.conf" "$kind" 600
 }
 
 # list_tools FILE  ->  "name  type  exec" table (paths shown with ~)

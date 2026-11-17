@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-sandbox Command Map</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* layout: one state diagram (install lane + per-tool lane), then a "what it touches" matrix */
+:root {
+  --bg: #f5f7f8; --panel: #ffffff; --fg: #17222b; --muted: #5b6b77; --line: #c9d3da;
+  --accent: #0f7b74; --accent-soft: #dff1ef; --warn: #a8620a; --warn-soft: #fbeedb;
+  --neutral-soft: #eceff2; --edge: #3d4b56;
+  --sans: "IBM Plex Sans", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #10171c; --panel: #172128; --fg: #e3eaef; --muted: #93a3ae; --line: #2e3c46;
+  --accent: #4cc3b8; --accent-soft: #14332f; --warn: #e7a650; --warn-soft: #3a2a14;
+  --neutral-soft: #1f2b33; --edge: #a9b7c1; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #10171c; --panel: #172128; --fg: #e3eaef; --muted: #93a3ae; --line: #2e3c46;
+  --accent: #4cc3b8; --accent-soft: #14332f; --warn: #e7a650; --warn-soft: #3a2a14;
+  --neutral-soft: #1f2b33; --edge: #a9b7c1; color-scheme: dark }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sans); line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+main { max-width: 1040px; margin: 0 auto; padding-block: 32px 48px; display: grid; gap: 28px; }
+h1 { font-size: 1.6rem; font-weight: 600; margin: 0; text-wrap: balance; }
+h2 { font-size: 1.05rem; font-weight: 600; margin: 0 0 12px; }
+header p { margin: 6px 0 0; color: var(--muted); max-width: 68ch; }
+code, .mono { font-family: var(--mono); font-size: .92em; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 20px; min-width: 0; }
+.scroll { overflow-x: auto; }
+svg { display: block; width: 100%; min-width: 720px; height: auto; }
+svg text { font-family: var(--sans); fill: var(--fg); font-size: 13px; }
+svg .t-title { font-weight: 600; font-size: 14px; }
+svg .t-sub { fill: var(--muted); font-size: 12px; font-family: var(--mono); }
+svg .t-cmd { font-family: var(--mono); font-weight: 500; font-size: 13px; }
+svg .t-note { fill: var(--muted); font-size: 12px; }
+svg .t-lane { fill: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+.n-plain { fill: var(--neutral-soft); stroke: var(--line); }
+.n-good { fill: var(--accent-soft); stroke: var(--accent); }
+.n-warn { fill: var(--warn-soft); stroke: var(--warn); }
+.e { stroke: var(--edge); stroke-width: 1.5; fill: none; }
+.e-auto { stroke: var(--warn); stroke-dasharray: 5 4; }
+.e-back { stroke: var(--accent); }
+.ah { fill: var(--edge); } .ah-warn { fill: var(--warn); } .ah-acc { fill: var(--accent); }
+.lane { stroke: var(--line); stroke-dasharray: 2 4; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 12px; color: var(--muted); font-size: .85rem; }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.sw { width: 26px; height: 0; border-top: 2px solid var(--edge); }
+.sw.auto { border-top: 2px dashed var(--warn); } .sw.back { border-top-color: var(--accent); }
+table { border-collapse: collapse; width: 100%; min-width: 680px; font-size: .9rem; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: .75rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+td:first-child { font-family: var(--mono); font-weight: 500; white-space: nowrap; }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: .78rem; font-weight: 500; white-space: nowrap; }
+.p-w { background: var(--accent-soft); color: var(--accent); }
+.p-x { background: var(--warn-soft); color: var(--warn); }
+.p-r { background: var(--neutral-soft); color: var(--muted); }
+.dash { color: var(--muted); }
+.note { color: var(--muted); font-size: .88rem; margin: 12px 0 0; max-width: 75ch; }
+</style>
+</head>
+<body>
+
+<main>
+  <header>
+    <h1>ai-sandbox command map</h1>
+    <p>What each <code>ai-sandbox-admin</code> command does to a tool, using Claude Code at <code>~/.local/bin/claude</code> as the example. There is no separate <code>edit</code> command: you edit <code>tools.conf</code> by hand, then run <code>sync</code>.</p>
+  </header>
+
+  <section class="panel">
+    <h2>States and the commands that move between them</h2>
+    <div class="scroll">
+    <svg viewBox="0 0 1000 600" role="img" aria-label="State diagram of ai-sandbox-admin commands">
+      <defs>
+        <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="aw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-warn" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-acc" d="M0,0 L10,5 L0,10 z"/></marker>
+      </defs>
+
+      <!-- install lane -->
+      <text class="t-lane" x="40" y="22">Once per machine or user</text>
+      <rect class="n-plain" x="40" y="34" width="220" height="62" rx="6"/>
+      <text class="t-title" x="56" y="60">Not installed</text>
+      <text class="t-sub" x="56" y="80">no ai-sandbox programs</text>
+      <rect class="n-good" x="440" y="34" width="240" height="62" rx="6"/>
+      <text class="t-title" x="456" y="60">Installed</text>
+      <text class="t-sub" x="456" y="80">programs + shell hook in rc</text>
+      <line class="e" x1="260" y1="52" x2="436" y2="52" marker-end="url(#a)"/>
+      <text class="t-cmd" x="348" y="45" text-anchor="middle">install</text>
+      <line class="e" x1="440" y1="80" x2="264" y2="80" marker-end="url(#a)"/>
+      <text class="t-cmd" x="348" y="98" text-anchor="middle">uninstall</text>
+      <text class="t-note" x="700" y="56">uninstall also runs reset first and</text>
+      <text class="t-note" x="700" y="73">removes the hook lines from</text>
+      <text class="t-note" x="700" y="90">~/.zshrc and ~/.bashrc</text>
+
+      <line class="lane" x1="20" y1="128" x2="980" y2="128"/>
+      <text class="t-lane" x="40" y="152">Per tool, while installed</text>
+
+      <!-- A: unsandboxed -->
+      <rect class="n-plain" x="40" y="330" width="220" height="80" rx="6"/>
+      <text class="t-title" x="56" y="356">Unsandboxed</text>
+      <text class="t-sub" x="56" y="376">claude = real program</text>
+      <text class="t-sub" x="56" y="394">not in tools.conf</text>
+
+      <!-- B: configured, not wrapped -->
+      <rect class="n-plain" x="370" y="170" width="220" height="80" rx="6"/>
+      <text class="t-title" x="386" y="196">Configured, not wrapped</text>
+      <text class="t-sub" x="386" y="216">[claude] in tools.conf</text>
+      <text class="t-sub" x="386" y="234">claude = real program</text>
+
+      <!-- C: sandboxed -->
+      <rect class="n-good" x="700" y="330" width="240" height="80" rx="6"/>
+      <text class="t-title" x="716" y="356">Sandboxed</text>
+      <text class="t-sub" x="716" y="376">claude = wrapper</text>
+      <text class="t-sub" x="716" y="394">real at .ai-real-claude</text>
+
+      <!-- D: replaced by update -->
+      <rect class="n-warn" x="700" y="500" width="240" height="80" rx="6"/>
+      <text class="t-title" x="716" y="526">Replaced by an update</text>
+      <text class="t-sub" x="716" y="546">new real program sits</text>
+      <text class="t-sub" x="716" y="564">over the wrapper</text>
+
+      <!-- A <-> C -->
+      <line class="e" x1="260" y1="352" x2="696" y2="352" marker-end="url(#a)"/>
+      <text class="t-cmd" x="480" y="344" text-anchor="middle">add</text>
+      <text class="t-note" x="480" y="330" text-anchor="middle">search, pick, answer questions</text>
+      <line class="e" x1="700" y1="390" x2="264" y2="390" marker-end="url(#a)"/>
+      <text class="t-cmd" x="480" y="410" text-anchor="middle">remove</text>
+      <text class="t-note" x="480" y="427" text-anchor="middle">real program back, [claude] deleted, data kept</text>
+
+      <!-- A <-> B -->
+      <line class="e" x1="190" y1="330" x2="367" y2="217" marker-end="url(#a)"/>
+      <text class="t-note" x="276" y="262" text-anchor="end">edit tools.conf</text>
+      <text class="t-note" x="276" y="278" text-anchor="end">by hand</text>
+      <line class="e" x1="385" y1="250" x2="233" y2="328" marker-end="url(#a)"/>
+      <text class="t-cmd" x="296" y="316">remove</text>
+
+      <!-- B <-> C -->
+      <line class="e" x1="590" y1="215" x2="768" y2="327" marker-end="url(#a)"/>
+      <text class="t-cmd" x="668" y="256">sync</text>
+      <line class="e e-back" x1="740" y1="330" x2="578" y2="252" marker-end="url(#ag)"/>
+      <text class="t-cmd" x="668" y="312" text-anchor="end">reset</text>
+      <text class="t-note" x="668" y="300" text-anchor="end">config kept</text>
+
+      <!-- C <-> D -->
+      <line class="e e-auto" x1="790" y1="410" x2="790" y2="496" marker-end="url(#aw)"/>
+      <text class="t-note" x="778" y="452" text-anchor="end">tool updates itself</text>
+      <text class="t-note" x="778" y="468" text-anchor="end">(e.g. claude update)</text>
+      <line class="e" x1="850" y1="500" x2="850" y2="414" marker-end="url(#a)"/>
+      <text class="t-cmd" x="862" y="452">verify · sync</text>
+      <text class="t-note" x="862" y="468">verify runs at every</text>
+      <text class="t-note" x="862" y="484">new shell (hook)</text>
+    </svg>
+    </div>
+    <div class="legend">
+      <span><i class="sw"></i>you run a command</span>
+      <span><i class="sw back"></i>undo the wrapping, keep config</span>
+      <span><i class="sw auto"></i>happens outside ai-sandbox</span>
+    </div>
+    <p class="note">Every change above is logged in <code>actions.log</code> with a backup, so <code>ai-sandbox-undo last</code> reverses the most recent command and <code>ai-sandbox-undo all</code> reverses everything back to before <code>install</code>.</p>
+  </section>
+
+  <section class="panel">
+    <h2>What each command touches</h2>
+    <div class="scroll">
+    <table>
+      <thead><tr><th>Command</th><th>tools.conf</th><th>Program path</th><th>Shell rc files</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>install</td><td><span class="pill p-w">creates</span> if missing</td><td class="dash">—</td><td><span class="pill p-w">adds hook</span></td><td>Copies programs to <code>~/.local</code> (user) or <code>/usr/local</code> (root), then runs <code>sync</code> for a user install.</td></tr>
+        <tr><td>uninstall</td><td><span class="pill p-r">asks</span> delete or keep</td><td><span class="pill p-x">restores</span> every tool</td><td><span class="pill p-x">removes hook</span></td><td>As root it only cleans <code>/etc/zsh/zshrc</code> and <code>/etc/bash.bashrc</code>.</td></tr>
+        <tr><td>add [name]</td><td><span class="pill p-w">appends</span> [section]</td><td><span class="pill p-w">wraps</span></td><td class="dash">—</td><td>Interactive: picks programs, home folders it may see, args, env, aisup.</td></tr>
+        <tr><td>remove &lt;name&gt;</td><td><span class="pill p-x">deletes</span> [section]</td><td><span class="pill p-x">restores</span></td><td class="dash">—</td><td>The tool's own data (<code>~/.claude</code>…) is kept.</td></tr>
+        <tr><td>sync</td><td><span class="pill p-r">reads</span></td><td><span class="pill p-w">wraps</span> all listed</td><td class="dash">—</td><td>Asks before a first rename. Use after editing <code>tools.conf</code>.</td></tr>
+        <tr><td>verify [-q]</td><td><span class="pill p-r">reads</span></td><td><span class="pill p-w">re-wraps</span> if replaced</td><td class="dash">—</td><td>Run quietly by the shell hook at every new shell.</td></tr>
+        <tr><td>reset</td><td><span class="pill p-r">kept</span></td><td><span class="pill p-x">restores</span> all</td><td class="dash">—</td><td>Run <code>sync</code> later to wrap everything again.</td></tr>
+        <tr><td>list · search</td><td><span class="pill p-r">reads</span></td><td class="dash">—</td><td class="dash">—</td><td>Read-only; nothing is logged.</td></tr>
+        <tr><td>ai-sandbox-undo</td><td colspan="3"><span class="pill p-x">reverses</span> what the chosen runs changed</td><td><code>list</code>, <code>last</code>, <code>all</code>; then <code>purge</code> deletes the log itself.</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+</main>
+</body>
+</html>

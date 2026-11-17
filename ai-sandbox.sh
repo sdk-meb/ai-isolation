@@ -166,8 +166,8 @@ for w in "$PROJECT" "${T_RW[@]}" "${T_RWFILE[@]}"; do
 done
 
 # --- never expose well-known secrets, whatever tools.conf says ---------------
-# The list is in lib.sh (root-owned in a root install, never visible inside).
-secrets_load            # SECRETS=(...) from lib.sh + /etc/ai-sandbox/secrets.conf
+# The list is <lib>/secrets.list (root-owned in a root install, never visible inside).
+secrets_load "$LIB"     # <lib>/secrets.list + /etc/ai-sandbox/secrets.conf, or die
 for w in "$PROJECT" "${T_RW[@]}" "${T_RWFILE[@]}" "${T_RO[@]}"; do
   if s=$(touches_secret "$w"); then die "[$NAME] '$w' would expose $s inside the sandbox — refusing"; fi
 done

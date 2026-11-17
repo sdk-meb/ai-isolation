@@ -233,9 +233,13 @@ The default tools:
   - cloud: `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.oci`, `~/.kube`, `~/.docker`, doctl, hcloud, `~/.terraform.d`, `~/.vault-token`, rclone;
   - developer tokens: `~/.config/gh`, hub, glab, `~/.config/github-copilot`, `~/.npmrc`, `~/.yarnrc.yml`, `~/.pypirc`, cargo and gem credentials;
   - browsers and mail: `~/.mozilla`, `~/.thunderbird`, Chrome, Chromium, Brave, Edge, Vivaldi, Opera — and **all of `~/snap` and `~/.var/app`** (snap and Flatpak apps, which keep their browser profiles there).
-- **The list is not complete.** It names known locations. A tool that stores its token somewhere else is not protected, so keep `rw`/`ro` narrow. An admin can add or remove entries in **`/etc/ai-sandbox/secrets.conf`** (`deny ~/.config/mytool` / `allow ~/.pki`, one per line). The launcher only reads it if it is root-owned and not group/world-writable.
+- **The list is a data file: `secrets.list`**, installed next to `lib.sh` (root install: `/usr/local/lib/ai-sandbox/secrets.list`, root-owned `644`, so `cat` it, and change it only with `sudo`). One `deny PATH` per line. A reinstall replaces it, so put your own changes in a **`secrets.conf`**, which no reinstall ever touches. Both are created for you, with comments and no rules:
+  - **`/etc/ai-sandbox/secrets.conf`**: the admin's rules, created by a root install (root-owned `644`). Takes `deny ~/.config/mytool` and `allow ~/.pki` (un-hide a built-in entry), one per line. It is read last, so it has the final word.
+  - **`~/.config/ai-sandbox/secrets.conf`**: your own rules, created by `sync` (mode `600`, never visible inside the sandbox). In a **root install it takes only `deny`**: it is your file, so a rule there may add secrets but never remove one (an `allow` line stops every tool from starting, with a message). In a user install it takes `deny` and `allow`.
+- **It fails closed.** No tool starts if `secrets.list` is missing, has no `deny` line, has a line it doesn't understand, or isn't a full path, or if it or any folder above it is writable by group/others (a sticky root folder like `/tmp` is fine). In a root install it must also be owned by root. The same goes for `/etc/ai-sandbox/secrets.conf` if it exists: it must be root-owned and not group/world-writable, otherwise nothing starts (before, it was only ignored with a warning). A missing or tampered list never means "no secrets". `ai-sandbox-admin add` uses the same list to mark paths as BLOCKED.
+- **The list is not complete.** It names known locations. A tool that stores its token somewhere else is not protected, so keep `rw`/`ro` narrow.
 - **AI tool data is isolated per tool. A tool may only see its own data dir.** If a tool's `rw`, `rw-file`, `ro` or `project` (fixed, or the folder you start a `cwd` tool in) is, contains or sits inside a path another tool lists as `rw`, `rw-file` or `ro`, it is refused. For example, `[claude]` with `rw = ~/.copilot` is refused. Symlinks are resolved first. The check runs in the launcher and in `ai-sandbox-admin add`/`sync`. Unlike the secrets list it has no exceptions: `/etc/ai-sandbox/secrets.conf` cannot `allow` it. Editor data such as `~/.config/Code` is protected this way, not by the secrets list: give the editor its own entry (`[code]` with `rw = ~/.config/Code`) and no other tool can get it. **Without such an entry nothing guards `~/.config/Code`**, and it can hold tokens (VS Code started with `--password-store=basic` keeps them there in an easily decrypted file).
-- **The list protects you only in a root install.** It lives in the program. In a user install the program is in `~/.local/bin`, owned by you, so any program running as you can edit the list (tested: removing `~/.ssh` from it made the key readable).
+- **The list protects you only in a root install.** In a user install `secrets.list` is in `~/.local/lib/ai-sandbox`, owned by you, and so is the launcher that reads it, so any program running as you can edit either one (tested: removing `~/.ssh` made the key readable).
 
 ## What every tool gets
 
@@ -298,7 +302,7 @@ ai-sandbox ─► aisup (outside the sandbox, supervisor)
 - **Root install vs user install:**
   - A root install makes the *programs* tamper-proof.
   - Your *config* is in your home either way. It's safe from the AI (invisible inside the sandbox), but not from other programs running as you outside it.
-  - A user install makes the programs just as editable as the config — including the built-in secrets list.
+  - A user install makes the programs just as editable as the config — including `secrets.list`.
 - **Bypass is still possible on purpose.** Running `.ai-real-<tool>` directly is not sandboxed, and a tool that bundles its own copy elsewhere (e.g. an IDE extension shipping its own `claude`) needs its own entry.
 - **Exec rules are a guard rail.**
   - `python3 -c …` is one exec, so only the interpreter is checked.
@@ -388,6 +392,64 @@ The tools' own data (`~/.claude`, `~/.config/Cursor`, …) is never touched.
 What stays after `undo all` + `purge`, on purpose:
 - the data a tool saved while it ran (`~/.claude/…`), exactly as if it had run without the sandbox;
 - a newer tool version an updater installed meanwhile.
+
+### Remove everything
+
+Run these to remove every file, folder and edit that ai-sandbox made, and go back to the state before the install. First **close every sandboxed tool** (claude, copilot, VS Code, Cursor…).
+
+**User install** (`~/.local`):
+
+```sh
+U=~/.local/state/ai-sandbox/ai-sandbox-undo   # the copy next to the log: it survives uninstall
+
+$U list                 # what can still be undone
+$U -n all               # dry run: shows every step, changes nothing
+$U all                  # undo everything: wrappers -> real programs, rc-file hooks,
+                        # programs in ~/.local/bin + ~/.local/lib/ai-sandbox, your config
+$U purge                # delete the log, backups, this undo tool, ~/.local/state/aisup.log
+                        # and every EMPTY folder the sandbox created
+```
+
+If `all` reports **skipped** steps, the file was changed after it was made (typically `~/.config/ai-sandbox/tools.conf` that you edited by hand, or added tools to with `add`). Look at what it says, then force those steps:
+
+```sh
+$U -f all               # saves the current version to backups/forced-* first
+cp -r ~/.local/state/ai-sandbox/backups/forced-* ~/somewhere/   # keep them? purge deletes backups
+$U purge
+```
+
+**Root install** (`/usr/local`): every user first runs the user steps above (their wrappers, and `dpkg-divert`s made with sudo, are in *their* log). Then as root:
+
+```sh
+su -
+/var/lib/ai-sandbox/ai-sandbox-undo all
+/var/lib/ai-sandbox/ai-sandbox-undo purge
+rm -r /etc/ai-sandbox   # only if it is still there: uninstall keeps secrets.conf once you edited it
+```
+
+**Check that nothing is left.** Each command should print nothing:
+
+```sh
+ls -d ~/.config/ai-sandbox ~/.local/lib/ai-sandbox ~/.local/state/ai-sandbox \
+      ~/.local/state/aisup.log ~/.local/bin/ai-sandbox* "$XDG_RUNTIME_DIR/ai-sandbox" \
+      /usr/local/lib/ai-sandbox /usr/local/bin/ai-sandbox* /var/lib/ai-sandbox /etc/ai-sandbox 2>/dev/null
+grep -n 'ai-sandbox' ~/.bashrc ~/.zshrc /etc/bash.bashrc /etc/zsh/zshrc 2>/dev/null   # hook lines
+find ~/.local/bin ~/.local/share /usr/local /usr/share /opt -maxdepth 3 -name '.ai-real-*' 2>/dev/null   # moved programs
+grep -rlI 'ai-sandbox wrapper' ~/.local/bin /usr/local/bin /usr/share /opt 2>/dev/null   # wrappers left
+dpkg-divert --list 2>/dev/null | grep ai-real                                            # package diversions
+```
+
+If something still shows up:
+
+| Left over | Why | Remove with |
+|---|---|---|
+| `$XDG_RUNTIME_DIR/ai-sandbox/` | runtime folder (sockets, private `/tmp`); it's in RAM and goes away at logout/reboot | `rm -rf "$XDG_RUNTIME_DIR/ai-sandbox"` |
+| `~/.config/ai-sandbox/` | skipped because you edited it, and not forced | `rm -r ~/.config/ai-sandbox` |
+| a wrapper and its `.ai-real-<x>` | an update replaced something in a way undo couldn't verify | `mv <dir>/.ai-real-<x> <dir>/<x>` (it overwrites the wrapper) |
+| a `dpkg-divert` | root-owned program wrapped with sudo | `sudo rm <path> && sudo dpkg-divert --local --rename --divert <dir>/.ai-real-<x> --remove <path>` |
+| `/etc/ai-sandbox/secrets.conf` | kept by uninstall because you edited it | `sudo rm -r /etc/ai-sandbox` |
+
+**Never removed, on purpose:** the tools' own data, such as `~/.claude`, `~/.claude.json`, `~/.copilot`, `~/.config/Code`, `~/.vscode`, `~/.config/Cursor` and `~/.cursor`. The tools use these without the sandbox too, and they hold your logins, history and settings. Undo only removes such a folder if the sandbox created it and it is still empty. Delete them yourself only if you want to remove **the tools'** data as well (that logs you out of them).
 
 ## Not implemented yet
 

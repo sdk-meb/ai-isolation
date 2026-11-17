@@ -399,10 +399,15 @@ cmd_install() {
   act_install "$SRC/ai-sandbox.sh"       "$BIN/ai-sandbox"       755
   act_install "$SRC/ai-sandbox-admin.sh" "$BIN/ai-sandbox-admin" 755
   act_install "$SRC/undo.sh"             "$BIN/ai-sandbox-undo"  755
-  for f in lib.sh check.sh shell-hook.sh tools.conf policy.conf; do
+  for f in lib.sh secrets.list check.sh shell-hook.sh tools.conf policy.conf; do
     act_install "$SRC/$f" "$LIBDIR/$f" 644        # tools/policy.conf = defaults for new users
   done
   echo "programs:   $BIN/ai-sandbox, $BIN/ai-sandbox-admin, $BIN/ai-sandbox-undo, $LIBDIR/"
+  if (( EUID == 0 )); then      # the admin's own secrets rules (each user's: see sync)
+    act_mkdir "$(dirname "$SECRETS_CONF")" 755
+    ensure_secrets_conf "$SECRETS_CONF" etc 644
+    echo "secrets:    $LIBDIR/secrets.list (built-in), $SECRETS_CONF (yours)"
+  fi
 
   # aisup (optional)
   if [[ -f /usr/include/seccomp.h ]] && command -v cc >/dev/null; then
@@ -450,6 +455,11 @@ cmd_uninstall() {
   act_rm "$LIBDIR"
   act_rm "$BIN/ai-sandbox"
   act_rm "$BIN/ai-sandbox-undo"
+  if (( EUID == 0 )) && [[ -f $SECRETS_CONF ]]; then   # only if you never edited it
+    if cmp -s "$SECRETS_CONF" <(secrets_conf_template etc); then
+      act_rm "$(dirname "$SECRETS_CONF")"
+    else echo "kept:       $SECRETS_CONF (you edited it; delete by hand: rm -r $(dirname "$SECRETS_CONF"))"; fi
+  fi
 
   if (( EUID != 0 )); then
     if ask_yn "Also delete your config in $CONF?" n; then act_rm "$CONF"; else echo "kept:       $CONF"; fi
@@ -554,7 +564,7 @@ stars() { local s="" i; for ((i = 1; i <= 5; i++)); do if (( i <= $1 )); then s+
 pick_home_paths() {
   local -a cand=() kinds=() scores=() whys=() defs=() locks=() order=()
   local c i k ans hint def
-  secrets_load
+  secrets_load "$(installed_lib)"
   mapfile -t cand < <(home_candidates "$@")
   for c in "${cand[@]}"; do
     rate_path "$c" "$@"
