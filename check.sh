@@ -2,9 +2,9 @@
 # =============================================================================
 # check.sh — prove the sandbox walls hold. Run from a (throwaway) project:
 #
-#   ai-sandbox check                 # installed
+#   ai-sandbox-admin check           # installed
 #   bash ./check.sh                  # from the source folder
-#   AISUP=1 ai-sandbox check         # same, under the exec supervisor
+#   AISUP=1 ai-sandbox-admin check   # same, under the exec supervisor
 #
 # Each test runs a tiny bash command in the built-in "shell" profile, which
 # has exactly the common rules every AI tool gets.

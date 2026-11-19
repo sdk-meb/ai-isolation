@@ -294,13 +294,22 @@ ensure_conf() {
   ensure_secrets_conf "$conf/secrets.conf" "$kind" 600
 }
 
-# list_tools FILE  ->  "name  type  exec" table (paths shown with ~)
+# list_tools FILE  ->  "name  type  status  exec" table (paths shown with ~)
+#   status: sandboxed | UNSANDBOXED (a wrapped program is not our wrapper) | missing
 list_tools() {
-  local n
+  local n w st
   for n in $(conf_tools "$1"); do
+    conf_load "$1" "$n" || continue
+    st=sandboxed
+    for w in "${T_WRAPS[@]}"; do
+      if is_wrapper "$w"; then continue
+      elif [[ -e $w || -L $w ]]; then st=UNSANDBOXED; break
+      else st=missing; fi
+    done
+    (( ${#T_WRAPS[@]} )) || st=UNSANDBOXED
     ( HOME='~'; conf_load "$1" "$n" || exit 0
       more=""; (( ${#T_EXECS[@]} < 2 )) || more="  (+$(( ${#T_EXECS[@]} - 1 )) more)"
-      printf '  %-12s %-4s %s%s\n' "$n" "$T_TYPE" "$T_EXEC" "$more" ) || true
+      printf '  %-12s %-4s %-11s %s%s\n' "$n" "$T_TYPE" "$st" "$T_EXEC" "$more" ) || true
   done
 }
 

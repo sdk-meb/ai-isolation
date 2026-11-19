@@ -24,10 +24,10 @@ A sandbox for AI coding tools on Debian/Wayland. It covers CLIs and desktop apps
 shell `claude` · IDE · script · menu launcher (Exec=/usr/share/cursor/cursor)
         │
         ▼
-~/.local/bin/claude          ← now a 5-line wrapper (made by `sync` / `add`):
+~/.local/bin/claude          ← now a 5-line wrapper (made by `add` / `list`):
         │                       exec /usr/local/bin/ai-sandbox run claude "$@"
         ▼
-ai-sandbox run <tool> [args]    reads ~/.config/ai-sandbox/tools.conf
+ai-sandbox <tool> [args]        reads ~/.config/ai-sandbox/tools.conf
         │
         ▼
 [aisup policy] ─► bwrap … ─► ~/.local/bin/.ai-real-claude   (the real program)
@@ -37,8 +37,8 @@ Root install: `/usr/local/bin/ai-sandbox`. User install: `~/.local/bin/ai-sandbo
 
 - Inside the sandbox the original path is the real program again, so a tool can still call itself by name.
 - **A tool calling another sandboxed tool** (e.g. `code` runs `copilot`, or a CLI runs a GUI app): no second sandbox. Every other tool in your `tools.conf` has its real program mounted read-only at its original path (`~/.local/bin/copilot` is a symlink to the real program inside, as on the host; a script in your home also gets its own folder, read-only). So calling it just runs the original program, behind the **caller's** walls. To give it its files too, list it in the caller's **`runs =`** (see [`tools.conf`](#toolsconf)); otherwise it may need to log in again or get a token through `env-pass` (e.g. `GH_TOKEN`). If a wrapper is still reached somehow, the launcher sees it is already inside (marker `/run/.ai-sandbox` + pid 1 is `bwrap`) and runs the real program directly. `$AI_SANDBOX` names the outer tool.
-- **Updates:** run the real one outside the sandbox, e.g. `~/.local/bin/.ai-real-claude update`. If an update writes a new program over the wrapper (e.g. `npm install -g` of a newer version), the shell hook (`ai-sandbox-admin verify -q`, at every shell start) moves it aside and wraps it again.
-- **Root-owned folders** (e.g. `/usr/share/cursor`): `sync`/`add` use `sudo`. A file owned by a Debian package is moved with `dpkg-divert`, so `apt upgrade` installs new versions to `.ai-real-<tool>` and **never touches the wrapper**. See [Updates, packages and secrets](#updates-packages-and-secrets).
+- **Updates:** run the real one outside the sandbox, e.g. `~/.local/bin/.ai-real-claude update`. If an update writes a new program over the wrapper (e.g. `npm install -g` of a newer version), the shell hook (at every shell start) moves it aside and wraps it again.
+- **Root-owned folders** (e.g. `/usr/share/cursor`): `add`/`list` use `sudo`. A file owned by a Debian package is moved with `dpkg-divert`, so `apt upgrade` installs new versions to `.ai-real-<tool>` and **never touches the wrapper**. See [Updates, packages and secrets](#updates-packages-and-secrets).
 - Arguments pass through unchanged (`claude --resume`, `cursor .`).
 
 ---
@@ -65,7 +65,7 @@ Per user, always in your home:
 | `~/.config/ai-sandbox/tools.conf` | **Your AI tools** and what each may see. |
 | `~/.config/ai-sandbox/policy.conf` | Your aisup exec rules. |
 | `<dir>/<tool>` (the original path, e.g. `~/.local/bin/claude`) | The wrapper. |
-| `<dir>/.ai-real-<tool>` | The real program, moved aside. `reset` / `remove` put it back. |
+| `<dir>/.ai-real-<tool>` | The real program, moved aside. `remove` / `remove --all` put it back. |
 | `~/.local/state/ai-sandbox/` | Action log, backups, and a copy of `ai-sandbox-undo` (root: `/var/lib/ai-sandbox/`). Never visible inside the sandbox. |
 
 **How your config is protected:**
@@ -92,15 +92,15 @@ Root install:
 
 It **doesn't touch any home**. Each user then runs this once, as themselves:
 ```sh
-ai-sandbox-admin sync     # creates ~/.config/ai-sandbox/, asks before wrapping each tool
+ai-sandbox-admin list     # creates ~/.config/ai-sandbox/, asks before wrapping each tool
 ```
 
 **Alternative: as your normal user** (no root needed):
 ```sh
 cd ~/Workspace/sh-scripts/ai-isolation-setup
-bash install.sh           # → ~/.local, hook in ~/.zshrc + ~/.bashrc, runs sync
+bash install.sh           # → ~/.local, hook in ~/.zshrc + ~/.bashrc, wraps your tools
 ```
-User install refuses to run if a root install already exists. In that case, just run `sync`.
+User install refuses to run if a root install already exists. In that case, just run `ai-sandbox-admin list`.
 
 > This folder is inside `~/Workspace`, which Cursor can write to. Review its changes before installing, especially as root.
 
@@ -108,7 +108,7 @@ User install refuses to run if a root install already exists. In that case, just
 ```sh
 head -5 ~/.local/bin/claude   # → "# ai-sandbox wrapper …"
 cd ~/Workspace/some-project
-ai-sandbox check         # all PASS?
+ai-sandbox-admin check   # all PASS?
 claude                   # sandboxed
 ```
 
@@ -120,10 +120,10 @@ claude                   # sandboxed
 
 | Command | What it does |
 |---|---|
-| `ai-sandbox run <tool> [args…]` | Start a tool from your `tools.conf` sandboxed. The wrappers call this. |
-| `ai-sandbox run shell` | Built-in test profile: bash with only the common rules. |
-| `ai-sandbox list` | Show your tools. |
-| `ai-sandbox check` | Run the wall tests from the current directory. |
+| `ai-sandbox <tool> [args…]` | Start a tool from your `tools.conf` sandboxed. The wrappers call this (as `ai-sandbox run <tool>`, same thing). |
+| `ai-sandbox shell` | Built-in test profile: bash with only the common rules. |
+
+That is its only job. Everything else is in `ai-sandbox-admin`.
 
 | Variable (per run) | Effect |
 |---|---|
@@ -137,16 +137,16 @@ claude                   # sandboxed
 | Command | Run as | What it does |
 |---|---|---|
 | `install` | root (preferred) or user | Install the programs (see above). |
-| `uninstall` | root → system install; user → user install | Remove the programs. A user uninstall also runs `reset` and asks before deleting `~/.config/ai-sandbox`. Before a root uninstall, users should run `reset`. |
-| `search <name>` | you | List programs and menu launchers whose name contains `<name>`. Changes nothing. |
+| `uninstall` | root → system install; user → user install | Remove the programs. A user uninstall also runs `remove --all` and asks before deleting `~/.config/ai-sandbox`. Before a root uninstall, users should run `remove --all`. |
 | `add [name]` | you | Interactive add (see below). |
 | `remove <name>` | you | Put the real program back (and remove a dpkg diversion), then delete the tool's section. Logged, so `ai-sandbox-undo last` brings it back. Its data is kept. |
-| `list` | you | Show your tools. |
-| `sync` | you | Wrap every tool in `tools.conf` (asks before each first move; sudo for root-owned folders). Run it after editing by hand. |
-| `verify [-q]` | you | Re-wrap tools an update replaced, point `exec-newest` tools at their newest version, and warn about orphan wrappers (real program gone). `-q` (shell hook): silent unless something needs you, never sudo. |
-| `reset` | you | Put every real program back. The config is kept. |
+| `remove --all` | you | Put every real program back. The config is kept. |
+| `list` | you | First makes reality match `tools.conf`: wraps every tool (asks before each first move; sudo for root-owned folders), re-wraps what an update replaced, points `exec-newest` tools at their newest version. Then shows each tool as `sandboxed`, `UNSANDBOXED` or `missing`. Run it after editing `tools.conf` by hand. |
+| `check` | you | Run the wall tests from the current directory (`AISUP=1` for the supervisor). |
 
-`search`, `add`, `remove`, `sync` and `reset` refuse to run as root, because the config is per user.
+The shell hook does the re-wrap part of `list` silently at every shell start (never with sudo).
+
+`add`, `remove` and `list` refuse to run as root, because the config is per user.
 
 ### What `add` asks
 
@@ -199,7 +199,7 @@ runs = copilot                    # other sandboxed tools it starts (see below)
 
 - `#` starts a comment anywhere on a line.
 - `shell` is a reserved name.
-- A section without `wrapped =` is skipped by `sync` with a warning (nothing would start it sandboxed).
+- A section without `wrapped =` is skipped by `list` with a warning (nothing would start it sandboxed).
 - **Several programs in one tool:** repeat `exec =` + `wrapped =` as pairs, in order (the Nth `exec` is the real program behind the Nth `wrapped`). The first pair is the main program; `exec-newest` only applies to it. The numbers must match, or the section is refused.
   ```ini
   [devin]
@@ -208,7 +208,7 @@ runs = copilot                    # other sandboxed tools it starts (see below)
   exec = /usr/share/devin-desktop/bin/.ai-real-devin-desktop    # its CLI script
   wrapped = /usr/share/devin-desktop/bin/devin-desktop
   ```
-  An extra program's wrapper runs `ai-sandbox run --via <its path> <tool>`, and the launcher only accepts a `--via` path listed in that section. Inside the sandbox every `wrapped` path is its real program again, so the programs can call each other (the CLI script runs the app binary, not a second sandbox). `sync`, `verify`, `remove` and `reset` handle every pair.
+  An extra program's wrapper runs `ai-sandbox run --via <its path> <tool>`, and the launcher only accepts a `--via` path listed in that section. Inside the sandbox every `wrapped` path is its real program again, so the programs can call each other (the CLI script runs the app binary, not a second sandbox). `list`, `remove` and the shell hook handle every pair.
 - **`runs = B C …`**: this tool starts those sandboxed tools (an editor runs `copilot`, a CLI runs a GUI app). They run inside *this* tool's sandbox, so it also gets their `rw`, `rw-file`, `ro`, `env-set`, `env-pass` and `exec-allow`, all through the same secret checks. If one of them is `type = gui`, a `cli` tool also gets the GUI parts (Wayland socket, GPU, `/sys` read-only, runtime dir; its `/tmp` stays fresh). With no Wayland session it warns and starts anyway, without them. An unknown name is ignored with a warning.
   ```ini
   [code]
@@ -218,7 +218,7 @@ runs = copilot                    # other sandboxed tools it starts (see below)
   rw = ~/.config/Code
   runs = copilot          # copilot inside VS Code finds its login in ~/.copilot
   ```
-- **Several tools may use the same files** (`[code]` and `[copilot]` both `rw = ~/.copilot`). That is allowed. `add`, `sync` and `verify` print `hint: [x] '~/.copilot' is shared with [y]: both tools see it`; the launcher says nothing.
+- **Several tools may use the same files** (`[code]` and `[copilot]` both `rw = ~/.copilot`). That is allowed. `add` and `list` print `hint: [x] '~/.copilot' is shared with [y]: both tools see it`; the launcher says nothing.
 - `desktop =` (old design) is ignored.
 
 The default tools:
@@ -227,7 +227,7 @@ The default tools:
 |---|---|---|---|---|
 | `claude` | `~/.local/bin/claude` | `~/.claude`, `~/.claude.json` | `~/.local/share/claude` | `DISABLE_AUTOUPDATER=1`; passes `ANTHROPIC_API_KEY` |
 | `copilot` | `~/.local/bin/copilot` | `~/.copilot` | — | passes `GH_TOKEN`, `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN` |
-| `cursor` | `/usr/share/cursor/cursor` | `~/.config/Cursor`, `~/.cursor`, project `~/Workspace` | — | gui; Wayland, no keyring; root-owned folder → `sync` uses sudo |
+| `cursor` | `/usr/share/cursor/cursor` | `~/.config/Cursor`, `~/.cursor`, project `~/Workspace` | — | gui; Wayland, no keyring; root-owned folder → `list` uses sudo |
 
 ---
 
@@ -235,9 +235,9 @@ The default tools:
 
 - **Tools that update into a `versions/` folder** (Claude Code). Tested with the real updater (2.1.311 → 2.1.325): it sees that `~/.local/bin/claude` is not its symlink, prints *"auto-update leaves it untouched"*, and only adds the new version under `versions/`. The wrapper stays byte-identical, also when you re-run the official installer.
   - **Old versions pile up.** Because of the wrapper, the updater says it *"cannot tell which version your launcher needs, so it keeps them all"*. Delete old folders in `~/.local/share/claude/versions/` yourself now and then; `exec-newest` always runs the highest one.
-  - **This is what those versions do, not a promise.** Anthropic can change the updater. `../vm-test` installs *today's* stable and latest each run, so re-run `tests/run-all.sh 00 60 97` after a big Claude update. If a future updater does overwrite the wrapper, the fallback still works (tested by `global-test.sh` #6): `verify` (every new terminal) sees the wrapper is gone and wraps the new program again. In between, `claude` from an **already open** terminal runs unsandboxed. Check with `ai-sandbox-admin verify`.
+  - **This is what those versions do, not a promise.** Anthropic can change the updater. `../vm-test` installs *today's* stable and latest each run, so re-run `tests/run-all.sh 00 60 97` after a big Claude update. If a future updater does overwrite the wrapper, the fallback still works (tested by `global-test.sh` #6): the shell hook (every new terminal) sees the wrapper is gone and wraps the new program again. In between, `claude` from an **already open** terminal runs unsandboxed. Check with `ai-sandbox-admin list`.
 - **`exec-newest = GLOB`** handles that: at every start the launcher runs the **highest version** among the *executable files* matching GLOB, compared with `sort -V` (so `1.10` > `1.9`; names, not file times). `.ai-real-<tool>` stays a **symlink**; the shell hook (a new terminal) re-points it to that newest version, so running `.ai-real-<tool>` directly and undo use the newest too. If your `tools.conf` predates this, add `exec-newest = ~/.local/share/claude/versions/*` under `[claude]`.
-- **Files owned by a Debian package** (e.g. Cursor in `/usr/share/cursor`) are moved with `dpkg-divert --rename`, not `mv`. Tested with a real apt repo: `apt upgrade` and `apt install --reinstall` install the new version to `.ai-real-<tool>`, the wrapper stays byte-identical and `dpkg -V` stays clean. `reset`, `remove` and undo remove the diversion again.
+- **Files owned by a Debian package** (e.g. Cursor in `/usr/share/cursor`) are moved with `dpkg-divert --rename`, not `mv`. Tested with a real apt repo: `apt upgrade` and `apt install --reinstall` install the new version to `.ai-real-<tool>`, the wrapper stays byte-identical and `dpkg -V` stays clean. `remove` and undo remove the diversion again.
   - **`apt remove` of a wrapped package** deletes the real program but not our wrapper (dpkg doesn't know it). The wrapper is then an orphan: running it says *"its Debian package was probably removed; clean up with: ai-sandbox-admin remove <tool>"*, and a new terminal warns the same. Run that command.
 - **npm tools in your home:** `add` gives read-only access to the whole package folder (`…/node_modules/<pkg>`), not only its `bin/`.
 - **Known secrets are never exposed**, whatever `tools.conf` says. No project, `rw` or `ro` may be, contain or sit inside one of them. Symlinks are resolved first. The built-in list covers:
@@ -247,10 +247,10 @@ The default tools:
   - browsers and mail: `~/.mozilla`, `~/.thunderbird`, Chrome, Chromium, Brave, Edge, Vivaldi, Opera — and **all of `~/snap` and `~/.var/app`** (snap and Flatpak apps, which keep their browser profiles there).
 - **The list is a data file: `secrets.list`**, installed next to `lib.sh` (root install: `/usr/local/lib/ai-sandbox/secrets.list`, root-owned `644`, so `cat` it, and change it only with `sudo`). One `deny PATH` per line. A reinstall replaces it, so put your own changes in a **`secrets.conf`**, which no reinstall ever touches. Both are created for you, with comments and no rules:
   - **`/etc/ai-sandbox/secrets.conf`**: the admin's rules, created by a root install (root-owned `644`). Takes `deny ~/.config/mytool` and `allow ~/.pki` (un-hide a built-in entry), one per line. It is read last, so it has the final word.
-  - **`~/.config/ai-sandbox/secrets.conf`**: your own rules, created by `sync` (mode `600`, never visible inside the sandbox). In a **root install it takes only `deny`**: it is your file, so a rule there may add secrets but never remove one (an `allow` line stops every tool from starting, with a message). In a user install it takes `deny` and `allow`.
+  - **`~/.config/ai-sandbox/secrets.conf`**: your own rules, created on first use (mode `600`, never visible inside the sandbox). In a **root install it takes only `deny`**: it is your file, so a rule there may add secrets but never remove one (an `allow` line stops every tool from starting, with a message). In a user install it takes `deny` and `allow`.
 - **It fails closed.** No tool starts if `secrets.list` is missing, has no `deny` line, has a line it doesn't understand, or isn't a full path, or if it or any folder above it is writable by group/others (a sticky root folder like `/tmp` is fine). In a root install it must also be owned by root. The same goes for `/etc/ai-sandbox/secrets.conf` if it exists: it must be root-owned and not group/world-writable, otherwise nothing starts (before, it was only ignored with a warning). A missing or tampered list never means "no secrets". `ai-sandbox-admin add` uses the same list to mark paths as BLOCKED.
 - **The list is not complete.** It names known locations. A tool that stores its token somewhere else is not protected, so keep `rw`/`ro` narrow.
-- **AI tool data is per tool by default, and shared only where you say so.** A tool sees only the paths in its own section (and those of the tools in its `runs =`). If its `rw`, `rw-file`, `ro` or fixed `project` is, contains or sits inside a path another tool lists, that is allowed, and `add`/`sync` show a **hint** (`… is shared with [tool]: both tools see it`), so a shared login (e.g. `~/.copilot` for `[code]` and `[copilot]`) is always a visible choice. Symlinks are resolved first. A `cwd` project inside another tool's data is not refused either. Editor data such as `~/.config/Code` is not on the secrets list: give the editor its own entry (`[code]` with `rw = ~/.config/Code`), and any other tool that lists it shows up with a hint. **Nothing guards `~/.config/Code` against a tool you give it to**, and it can hold tokens (VS Code started with `--password-store=basic` keeps them there in an easily decrypted file).
+- **AI tool data is per tool by default, and shared only where you say so.** A tool sees only the paths in its own section (and those of the tools in its `runs =`). If its `rw`, `rw-file`, `ro` or fixed `project` is, contains or sits inside a path another tool lists, that is allowed, and `add`/`list` show a **hint** (`… is shared with [tool]: both tools see it`), so a shared login (e.g. `~/.copilot` for `[code]` and `[copilot]`) is always a visible choice. Symlinks are resolved first. A `cwd` project inside another tool's data is not refused either. Editor data such as `~/.config/Code` is not on the secrets list: give the editor its own entry (`[code]` with `rw = ~/.config/Code`), and any other tool that lists it shows up with a hint. **Nothing guards `~/.config/Code` against a tool you give it to**, and it can hold tokens (VS Code started with `--password-store=basic` keeps them there in an easily decrypted file).
 - **The list protects you only in a root install.** In a user install `secrets.list` is in `~/.local/lib/ai-sandbox`, owned by you, and so is the launcher that reads it, so any program running as you can edit either one (tested: removing `~/.ssh` made the key readable).
 
 ## What every tool gets
@@ -333,16 +333,16 @@ ai-sandbox ─► aisup (outside the sandbox, supervisor)
 
 | Symptom | Fix |
 |---|---|
-| `claude` still unsandboxed | Run `ai-sandbox-admin sync` and answer `y`. `head -2 ~/.local/bin/claude` must show `# ai-sandbox wrapper`. |
+| `claude` still unsandboxed | Run `ai-sandbox-admin list` and answer `y`. `head -2 ~/.local/bin/claude` must show `# ai-sandbox wrapper`. |
 | `… must belong to you and not be group/world-writable` | `chmod 600 ~/.config/ai-sandbox/*.conf` |
 | `… would be writable inside and contains …` | A `rw`/`project` path covers the sandbox's own files. Use a narrower path. |
 | `refusing to expose '…'` | `cd` into a project folder first, or set `AI_PROJECT=`. |
-| `run this as your normal user` | `search`, `add`, `remove`, `sync` and `reset` manage *your* config. Leave the root shell first. |
-| `root already installed it system-wide` | No user install is needed. Just run `ai-sandbox-admin sync`. |
+| `run this as your normal user` | `add`, `remove` and `list` manage *your* config. Leave the root shell first. |
+| `root already installed it system-wide` | No user install is needed. Just run `ai-sandbox-admin list`. |
 | `aisup is not installed` | `apt install libseccomp-dev gcc`, then run `install` again. |
-| Cursor: *SUID sandbox helper … not configured* | Not needed on Debian 12: Chromium's sandbox works inside bwrap (tested). If your kernel blocks it anyway, add `--no-sandbox` to `args` in `[cursor]` and run `sync`; bwrap is still the wall. |
+| Cursor: *SUID sandbox helper … not configured* | Not needed on Debian 12: Chromium's sandbox works inside bwrap (tested). If your kernel blocks it anyway, add `--no-sandbox` to `args` in `[cursor]` and run `ai-sandbox-admin list`; bwrap is still the wall. |
 | `cursor .` opens `cli.js` as a file | Your installed `ai-sandbox` is older than the Electron CLI fix. Re-run the install. |
-| Cursor shows no window | `AI_DEBUG=1 ai-sandbox run cursor` in a terminal and read the errors. |
+| Cursor shows no window | `AI_DEBUG=1 ai-sandbox cursor` in a terminal and read the errors. |
 | Claude: config not saved | Replace `rw-file = ~/.claude.json` with `env-set = CLAUDE_CONFIG_DIR=~/.claude`. |
 | Copilot asks to log in every time | There's no keyring inside. Export `GH_TOKEN` before starting it. |
 | Too many aisup prompts | Read `~/.local/state/aisup.log` and add `allow` lines above `default ask` in your `policy.conf`. |
@@ -351,7 +351,7 @@ ai-sandbox ─► aisup (outside the sandbox, supervisor)
 
 ## Log and undo
 
-Every change on disk is logged by `ai-sandbox-admin` (install, sync, add, remove, reset, uninstall, the shell hook's re-wraps) and by `ai-sandbox` (folders and files it creates for a tool). Anything overwritten or deleted is copied to `backups/` first.
+Every change on disk is logged by `ai-sandbox-admin` (install, add, remove, list, uninstall, the shell hook's re-wraps) and by `ai-sandbox` (folders and files it creates for a tool). Anything overwritten or deleted is copied to `backups/` first.
 
 | Who | Log | Backups |
 |---|---|---|
@@ -361,18 +361,16 @@ Every change on disk is logged by `ai-sandbox-admin` (install, sync, add, remove
 A command that changes nothing writes nothing. Changes made with `sudo` (e.g. wrapping Cursor) are in *your* log, marked `sudo`, and their undo uses sudo too.
 
 ```sh
-ai-sandbox-undo list            # runs that can still be undone, newest first
-ai-sandbox-undo show last       # what the newest run changed
-ai-sandbox-undo -n last         # dry run
-ai-sandbox-undo last            # undo the newest run (asks first; -y = don't ask)
-ai-sandbox-undo run <RUN-ID>    # undo one run
+ai-sandbox-undo                 # runs that can still be undone, newest first, with their changes
+ai-sandbox-undo last            # undo the newest run (asks first; -y = don't ask, -n = dry run)
+ai-sandbox-undo <RUN-ID>        # undo one run
 ai-sandbox-undo all             # undo everything → back to before the install
-ai-sandbox-undo purge           # the very last step, after `all`: delete the log, backups,
-                                # this tool, aisup.log and the empty folders it created
-ai-sandbox-undo prune [DAYS]    # free space: drop backups of undone runs (+ older than DAYS)
+ai-sandbox-undo purge           # after `all`: delete the log, backups, this tool, aisup.log
+                                # and the empty folders it created.
+                                # Before `all`: only frees space (backups of undone runs)
 ```
 
-- **It can stop anywhere.** Every change is logged *before* it is made, so a Ctrl-C, a crash, a power cut or a failing command never leaves a change the log doesn't know about. Undo recognises logged changes that never happened and skips them quietly. An undo that stopped half-way continues where it left off when you run it again. `../vm-test` (test 98) kills install, sync, uninstall and undo with SIGKILL at **every single step**, for a user install, a root install, and a `dpkg-divert` of a package file. Each time, `undo all` + `purge` gives back the home and the system **byte for byte** as before, except for the tool data and newer versions listed under *What stays* below.
+- **It can stop anywhere.** Every change is logged *before* it is made, so a Ctrl-C, a crash, a power cut or a failing command never leaves a change the log doesn't know about. Undo recognises logged changes that never happened and skips them quietly. An undo that stopped half-way continues where it left off when you run it again. `../vm-test` (test 98) kills install, list, uninstall and undo with SIGKILL at **every single step**, for a user install, a root install, and a `dpkg-divert` of a package file. Each time, `undo all` + `purge` gives back the home and the system **byte for byte** as before, except for the tool data and newer versions listed under *What stays* below.
 - **Which undo to run.** The very first thing `install` does is put the undo tool next to the log, so even an install that stopped at its first step can be undone with `~/.local/state/ai-sandbox/ai-sandbox-undo all` (root: `/var/lib/ai-sandbox/ai-sandbox-undo all`).
 - **Shell rc files** (`~/.bashrc`, `~/.zshrc`, `/etc/bash.bashrc`, `/etc/zsh/zshrc`): undo removes exactly the 2 lines the install added. Your own later edits stay. A leftover hook line is harmless anyway: it only runs if its script exists.
 
@@ -380,14 +378,14 @@ ai-sandbox-undo prune [DAYS]    # free space: drop backups of undone runs (+ old
 - **Non-empty folders are never deleted**, even with `-f` (e.g. `~/.claude` once the tool has saved data in it).
 - **Undoing the install or an uninstall** removes or restores `ai-sandbox-undo` itself. For that case, use the copy next to the log, which always stays: `~/.local/state/ai-sandbox/ai-sandbox-undo` (root: `/var/lib/ai-sandbox/ai-sandbox-undo`).
 - **Re-wraps after an update** are logged as notes, not as changes: undoing the install leaves the *newest* version of the tool in place. The obsolete old version is dropped, not backed up.
-- **Backups** hold every file the setup overwrote or deleted. Run `prune 30` now and then.
+- **Backups** hold every file the setup overwrote or deleted. `ai-sandbox-undo purge` frees the ones no longer needed.
 
 ## Uninstall
 
 ```sh
-ai-sandbox-admin reset          # each user: put the real programs back (config kept)
+ai-sandbox-admin remove --all   # each user: put the real programs back (config kept)
 su -; ai-sandbox-admin uninstall   # root install
-ai-sandbox-admin uninstall      # or, for a user install (also resets; asks about config)
+ai-sandbox-admin uninstall      # or, for a user install (also removes all; asks about config)
 ```
 
 The tools' own data (`~/.claude`, `~/.config/Cursor`, …) is never touched.

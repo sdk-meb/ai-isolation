@@ -2,23 +2,24 @@
 # =============================================================================
 # ai-sandbox-admin — install the AI sandbox and manage YOUR sandboxed AI tools
 #
-#   install        install the programs:
-#                    as root (preferred) -> /usr/local, root-owned
-#                    as a normal user    -> ~/.local
-#   uninstall      remove the programs (as root: system; as user: yours)
+#   install          install the programs:
+#                      as root (preferred) -> /usr/local, root-owned
+#                      as a normal user    -> ~/.local
+#   uninstall        remove the programs (as root: system; as user: yours)
 #
 #   --- as your normal user; config: ~/.config/ai-sandbox/ ---
-#   search <name>  find programs and menu launchers matching a name
-#   add [name]     interactive: search, pick, answer a few questions
-#   remove <name>  take a tool out of the sandbox (its data is kept)
-#   list           show your sandboxed tools
-#   sync           wrap every tool in tools.conf (asks before a first rename)
-#   verify [-q]    re-wrap tools that an update replaced
-#   reset          put every real program back (config kept)
+#   add [name]       interactive: search, pick, answer a few questions
+#   remove <name>    take a tool out of the sandbox (its data is kept)
+#   remove --all     put every real program back (config kept)
+#   list             your tools and whether they are really sandboxed; first
+#                    (re-)wraps what tools.conf lists (asks before a first
+#                    rename) — run it after editing tools.conf by hand
+#   check            test the sandbox walls from the current directory
 #
+# Tools replaced by an update are re-wrapped at every shell start (shell hook).
 # Every change is logged (root: /var/lib/ai-sandbox/actions.log, user:
 # ~/.local/state/ai-sandbox/actions.log) with a backup of anything it
-# overwrites or deletes. Reverse it with:  ai-sandbox-undo list | last | all
+# overwrites or deletes. Reverse it with:  ai-sandbox-undo   (then: last | <RUN> | all)
 #
 # How a tool is sandboxed: the real program <dir>/<tool> is moved to
 # <dir>/<prefix><tool> and a tiny wrapper takes its place:
@@ -105,7 +106,7 @@ choose_many() {  # choose_many "prompt" item...  -> CHOICES (0-based), e.g. "1 4
 }
 
 # -----------------------------------------------------------------------------
-# search: executables and menu launchers whose name contains <q>
+# executables and menu launchers whose name contains <q>
 # (system folders + YOUR home only)
 # -----------------------------------------------------------------------------
 search_bins() {
@@ -123,13 +124,6 @@ search_desktop() {
     if grep -qx 'X-AI-Sandbox=true' "$f"; then continue; fi       # one of ours
     if grep -qiE "^(Name|Exec)=.*$1" "$f"; then echo "$f"; fi
   done
-}
-
-cmd_search() {
-  local q=${1:-}
-  [[ $q =~ ^[A-Za-z0-9._-]+$ ]] || die "usage: ai-sandbox-admin search <name>"
-  echo "Programs:";       search_bins "$q"    | sed 's/^/  /'
-  echo "Menu launchers:"; search_desktop "$q" | sed 's/^/  /'
 }
 
 # -----------------------------------------------------------------------------
@@ -188,7 +182,7 @@ wrap_original() {
     return 0
   fi
   if is_wrapper "$orig"; then
-    [[ $(cat "$orig") != "$want" ]] || { [[ $mode == quiet ]] || echo "ok:         $orig"; return 0; }
+    [[ $(cat "$orig") != "$want" ]] || { [[ $mode == quiet || ${OK_QUIET:-0} == 1 ]] || echo "ok:         $orig"; return 0; }
   elif [[ -e $orig || -L $orig ]]; then
     if [[ -e $pre || -L $pre ]]; then
       echo "re-wrap:    $orig was replaced (update?)"
@@ -203,7 +197,7 @@ wrap_original() {
   fi
 
   priv_for "$(dirname "$orig")" "$mode" \
-    || { warn "[$name] can't write $(dirname "$orig"): run 'ai-sandbox-admin sync'"; return 0; }
+    || { warn "[$name] can't write $(dirname "$orig"): run 'ai-sandbox-admin list'"; return 0; }
 
   # Re-wrap after an update: the log already says "wrapper at $orig, real
   # program at $pre", and that is exactly what we restore. So this is NOT
@@ -340,6 +334,20 @@ cmd_sync() {
   done
 }
 
+cmd_list() {
+  # as your user: first make reality match tools.conf (wrap / re-wrap)
+  if (( EUID != 0 )) && runner >/dev/null; then OK_QUIET=1 cmd_sync; fi
+  [[ -f $TOOLS ]] || { echo "no tools yet ($TOOLS): ai-sandbox-admin add"; return 0; }
+  printf '  %-12s %-4s %-11s %s\n' TOOL TYPE STATUS PROGRAM
+  list_tools "$TOOLS"
+}
+
+cmd_check() {
+  local run
+  run=$(runner) || die "not installed yet: run 'ai-sandbox-admin install'"
+  AI_SANDBOX_BIN=$run exec bash "$(installed_lib)/check.sh"
+}
+
 cmd_reset() {
   need_user
   for_wrapped unwrap_original
@@ -391,7 +399,7 @@ cmd_install() {
     echo "System install: programs root-owned in /usr/local (preferred)."
     if [[ -n ${SUDO_USER:-} ]]; then warn "sudo works, but a real root login (su -) is preferred"; fi
   else
-    [[ ! -x $SYS_BIN/ai-sandbox ]] || die "root already installed it system-wide; just run: ai-sandbox-admin sync"
+    [[ ! -x $SYS_BIN/ai-sandbox ]] || die "root already installed it system-wide; just run: ai-sandbox-admin list"
     warn "user install into ~/.local. It works, but a ROOT install is preferred"
     warn "(su -, then bash install.sh): the programs are then root-owned and"
     warn "nothing running as you can modify them."
@@ -438,7 +446,7 @@ cmd_install() {
 
   echo
   if (( EUID == 0 )); then
-    echo "Done. Each user now runs once, as themselves:   ai-sandbox-admin sync"
+    echo "Done. Each user now runs once, as themselves:   ai-sandbox-admin list"
     echo "(that creates ~/.config/ai-sandbox/ and wraps their tools)."
   else
     cmd_sync
@@ -450,12 +458,12 @@ cmd_uninstall() {
   local rc
   pick_mode
   if (( EUID == 0 )); then
-    echo "Removing the system install. Users should first run:  ai-sandbox-admin reset"
+    echo "Removing the system install. Users should first run:  ai-sandbox-admin remove --all"
     echo "(otherwise their wrapped tools point to a missing ai-sandbox and won't start)."
     ask_yn "Continue?" n || return 0
   else
     [[ -x $USR_BIN/ai-sandbox ]] || [[ ! -x $SYS_BIN/ai-sandbox ]] \
-      || die "this is a system install: root removes it. To stop using it yourself: ai-sandbox-admin reset"
+      || die "this is a system install: root removes it. To stop using it yourself: ai-sandbox-admin remove --all"
     for_wrapped unwrap_original
     legacy_cleanup
     act_rm "$DATA/ai-sandbox"
@@ -866,7 +874,7 @@ cmd_add() {
   for x in "${exes[@]}"; do is_wrapper "$x" || bad+=("$x"); done
   if (( ${#bad[@]} )); then
     warn "[$name] saved in $TOOLS, but NOT wrapped yet: ${bad[*]} still run(s) UNSANDBOXED"
-    warn "        finish it with:  ai-sandbox-admin sync     (or undo: ai-sandbox-admin remove $name)"
+    warn "        finish it with:  ai-sandbox-admin list     (or undo: ai-sandbox-admin remove $name)"
     return 1
   fi
   echo "Done. ${exes[*]} now start(s) sandboxed, from anywhere."
@@ -875,6 +883,7 @@ cmd_add() {
 cmd_remove() {
   need_user
   local name=${1:-}
+  if [[ $name == --all ]]; then cmd_reset; return; fi
   if [[ -z $name ]]; then list_tools "$TOOLS"; printf 'Tool to remove: ' >/dev/tty; tty_read name; fi
   conf_tools "$TOOLS" | grep -qx -- "$name" || die "'$name' is not configured"
   # rename mode: put the real program back first
@@ -896,12 +905,13 @@ act_begin "ai-sandbox-admin $*"
 case "${1:-}" in
   install)   cmd_install ;;
   uninstall) cmd_uninstall ;;
-  search)    shift; cmd_search "${1:-}" ;;
   add)       shift; cmd_add "${1:-}" ;;
   remove)    shift; cmd_remove "${1:-}" ;;
-  list)      list_tools "$TOOLS" ;;
-  sync)      cmd_sync ;;
+  list)      cmd_list ;;
+  check)     cmd_check ;;
+  # internal / old names: the shell hook calls `verify -q`; old wrappers say `reset`
   verify)    shift; cmd_verify "${1:-}" ;;
+  sync)      cmd_sync ;;
   reset)     cmd_reset ;;
-  *) sed -n '3,28p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

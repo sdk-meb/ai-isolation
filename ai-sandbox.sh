@@ -4,15 +4,15 @@
 #              (installed as /usr/local/bin/ai-sandbox by root — preferred —
 #               or as ~/.local/bin/ai-sandbox by a user install)
 #
-#   ai-sandbox run [--via ORIG] <tool> [args...]
-#                                     start <tool> sandboxed. You rarely type
+#   ai-sandbox <tool> [args...]       start <tool> sandboxed. You rarely type
 #                                     this: the wrapper that replaced the
 #                                     original program (e.g. ~/.local/bin/claude)
-#                                     does it, so every caller is sandboxed.
+#                                     runs `ai-sandbox run [--via ORIG] <tool>`,
+#                                     so every caller is sandboxed.
 #                                     --via: which of the tool's wrapped
 #                                     programs was called (extra wrappers only)
-#   ai-sandbox list                   your sandboxed tools
-#   ai-sandbox check                  test the walls from the current directory
+#
+#   Managing tools (add/remove/list/check): ai-sandbox-admin
 #
 # Config (per user, private, created from the defaults on first use):
 #   ~/.config/ai-sandbox/tools.conf    which tools, what each may see
@@ -66,9 +66,9 @@ real_of_wrapper() {
 }
 run_nested() {   # run_nested [--via ORIG] <tool> [args...]
   local via="" name w real="" d
-  if [[ ${1:-} == --via ]]; then via=${2:-}; shift 2 || die "usage: ai-sandbox run [--via ORIG] <tool> [args...]"; fi
+  if [[ ${1:-} == --via ]]; then via=${2:-}; shift 2 || die "usage: ai-sandbox [--via ORIG] <tool> [args...]"; fi
   name=${1:-}
-  [[ $name =~ ^[A-Za-z0-9_-]+$ ]] || die "usage: ai-sandbox run <tool> [args...]"
+  [[ $name =~ ^[A-Za-z0-9_-]+$ ]] || die "usage: ai-sandbox <tool> [args...]"
   shift
   local outer=${AI_SANDBOX:-another tool}
   [[ $name != shell ]] || die "already inside the sandbox of [$outer]"
@@ -88,7 +88,12 @@ run_nested() {   # run_nested [--via ORIG] <tool> [args...]
   if [[ ${AI_DEBUG:-0} == 1 ]]; then echo "ai-sandbox: inside [$outer], running $real directly" >&2; fi
   exec "$real" "$@"
 }
-if [[ ${1:-} == run ]] && inside_sandbox; then shift; run_nested "$@"; fi
+# `ai-sandbox run <tool>` (what wrappers call) == `ai-sandbox <tool>`
+if [[ ${1:-} == run ]]; then shift
+elif [[ ${1:-} == list || ${1:-} == check ]]; then die "that is now:  ai-sandbox-admin $1"; fi
+[[ -n ${1:-} && ${1:-} != -h && ${1:-} != --help ]] \
+  || die "usage: ai-sandbox <tool> [args...]   (manage tools: ai-sandbox-admin)"
+if inside_sandbox; then run_nested "$@"; fi
 
 # Log what this run creates on the host (folders/files it binds), so
 # ai-sandbox-undo can remove them again. Nothing is logged if nothing is new.
@@ -104,20 +109,14 @@ for f in "$CONF/tools.conf" "$CONF/policy.conf"; do
     || die "$f must belong to you and not be group/world-writable (chmod 600 $f)"
 done
 
-case "${1:-}" in
-  run)   shift ;;
-  list)  list_tools "$CONF/tools.conf"; exit 0 ;;
-  check) AI_SANDBOX_BIN="$SELF" exec bash "$LIB/check.sh" ;;
-  *)     die "usage: ai-sandbox run <tool> [args...] | list | check" ;;
-esac
 
 # =============================================================================
 # 1. Load the tool's description
 # =============================================================================
 VIA=""
-if [[ ${1:-} == --via ]]; then VIA=${2:-}; shift 2 || die "usage: ai-sandbox run [--via ORIG] <tool> [args...]"; fi
+if [[ ${1:-} == --via ]]; then VIA=${2:-}; shift 2 || die "usage: ai-sandbox [--via ORIG] <tool> [args...]"; fi
 NAME="${1:-}"
-[[ $NAME =~ ^[A-Za-z0-9_-]+$ ]] || die "usage: ai-sandbox run <tool> [args...]"
+[[ $NAME =~ ^[A-Za-z0-9_-]+$ ]] || die "usage: ai-sandbox <tool> [args...]"
 shift
 
 if [[ $NAME == shell ]]; then
@@ -184,7 +183,7 @@ if [[ -z $REAL || ! -f $REAL || ! -x $REAL ]]; then
   die "[$NAME] program not found: $T_EXEC"
 fi
 if is_wrapper "$REAL"; then
-  die "[$NAME] exec points at a sandbox wrapper (loop) — run: ai-sandbox-admin sync"
+  die "[$NAME] exec points at a sandbox wrapper (loop) — run: ai-sandbox-admin list"
 fi
 
 BWRAP="$(command -v bwrap)" || die "bubblewrap is not installed"

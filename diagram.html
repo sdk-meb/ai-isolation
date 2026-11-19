@@ -67,7 +67,7 @@ td:first-child { font-family: var(--mono); font-weight: 500; white-space: nowrap
 <main>
   <header>
     <h1>ai-sandbox command map</h1>
-    <p>What each <code>ai-sandbox-admin</code> command does to a tool, using Claude Code at <code>~/.local/bin/claude</code> as the example. There is no separate <code>edit</code> command: you edit <code>tools.conf</code> by hand, then run <code>sync</code>.</p>
+    <p>What each <code>ai-sandbox-admin</code> command does to a tool, using Claude Code at <code>~/.local/bin/claude</code> as the example. There is no separate <code>edit</code> command: you edit <code>tools.conf</code> by hand, then run <code>list</code>.</p>
   </header>
 
   <section class="panel">
@@ -92,7 +92,7 @@ td:first-child { font-family: var(--mono); font-weight: 500; white-space: nowrap
       <text class="t-cmd" x="348" y="45" text-anchor="middle">install</text>
       <line class="e" x1="440" y1="80" x2="264" y2="80" marker-end="url(#a)"/>
       <text class="t-cmd" x="348" y="98" text-anchor="middle">uninstall</text>
-      <text class="t-note" x="700" y="56">uninstall also runs reset first and</text>
+      <text class="t-note" x="700" y="56">uninstall also runs remove --all and</text>
       <text class="t-note" x="700" y="73">removes the hook lines from</text>
       <text class="t-note" x="700" y="90">~/.zshrc and ~/.bashrc</text>
 
@@ -140,9 +140,9 @@ td:first-child { font-family: var(--mono); font-weight: 500; white-space: nowrap
 
       <!-- B <-> C -->
       <line class="e" x1="590" y1="215" x2="768" y2="327" marker-end="url(#a)"/>
-      <text class="t-cmd" x="668" y="256">sync</text>
+      <text class="t-cmd" x="668" y="256">list</text>
       <line class="e e-back" x1="740" y1="330" x2="578" y2="252" marker-end="url(#ag)"/>
-      <text class="t-cmd" x="668" y="312" text-anchor="end">reset</text>
+      <text class="t-cmd" x="668" y="312" text-anchor="end">remove --all</text>
       <text class="t-note" x="668" y="300" text-anchor="end">config kept</text>
 
       <!-- C <-> D -->
@@ -150,8 +150,8 @@ td:first-child { font-family: var(--mono); font-weight: 500; white-space: nowrap
       <text class="t-note" x="778" y="452" text-anchor="end">tool updates itself</text>
       <text class="t-note" x="778" y="468" text-anchor="end">(e.g. claude update)</text>
       <line class="e" x1="850" y1="500" x2="850" y2="414" marker-end="url(#a)"/>
-      <text class="t-cmd" x="862" y="452">verify · sync</text>
-      <text class="t-note" x="862" y="468">verify runs at every</text>
+      <text class="t-cmd" x="862" y="452">list · hook</text>
+      <text class="t-note" x="862" y="468">the hook runs at every</text>
       <text class="t-note" x="862" y="484">new shell (hook)</text>
     </svg>
     </div>
@@ -169,15 +169,14 @@ td:first-child { font-family: var(--mono); font-weight: 500; white-space: nowrap
     <table>
       <thead><tr><th>Command</th><th>tools.conf</th><th>Program path</th><th>Shell rc files</th><th>Notes</th></tr></thead>
       <tbody>
-        <tr><td>install</td><td><span class="pill p-w">creates</span> if missing</td><td class="dash">—</td><td><span class="pill p-w">adds hook</span></td><td>Copies programs to <code>~/.local</code> (user) or <code>/usr/local</code> (root), then runs <code>sync</code> for a user install.</td></tr>
+        <tr><td>install</td><td><span class="pill p-w">creates</span> if missing</td><td class="dash">—</td><td><span class="pill p-w">adds hook</span></td><td>Copies programs to <code>~/.local</code> (user) or <code>/usr/local</code> (root), then wraps your tools (like <code>list</code>) for a user install.</td></tr>
         <tr><td>uninstall</td><td><span class="pill p-r">asks</span> delete or keep</td><td><span class="pill p-x">restores</span> every tool</td><td><span class="pill p-x">removes hook</span></td><td>As root it only cleans <code>/etc/zsh/zshrc</code> and <code>/etc/bash.bashrc</code>.</td></tr>
         <tr><td>add [name]</td><td><span class="pill p-w">appends</span> [section]</td><td><span class="pill p-w">wraps</span></td><td class="dash">—</td><td>Interactive: picks programs, home folders it may see, args, env, aisup.</td></tr>
         <tr><td>remove &lt;name&gt;</td><td><span class="pill p-x">deletes</span> [section]</td><td><span class="pill p-x">restores</span></td><td class="dash">—</td><td>The tool's own data (<code>~/.claude</code>…) is kept.</td></tr>
-        <tr><td>sync</td><td><span class="pill p-r">reads</span></td><td><span class="pill p-w">wraps</span> all listed</td><td class="dash">—</td><td>Asks before a first rename. Use after editing <code>tools.conf</code>.</td></tr>
-        <tr><td>verify [-q]</td><td><span class="pill p-r">reads</span></td><td><span class="pill p-w">re-wraps</span> if replaced</td><td class="dash">—</td><td>Run quietly by the shell hook at every new shell.</td></tr>
-        <tr><td>reset</td><td><span class="pill p-r">kept</span></td><td><span class="pill p-x">restores</span> all</td><td class="dash">—</td><td>Run <code>sync</code> later to wrap everything again.</td></tr>
-        <tr><td>list · search</td><td><span class="pill p-r">reads</span></td><td class="dash">—</td><td class="dash">—</td><td>Read-only; nothing is logged.</td></tr>
-        <tr><td>ai-sandbox-undo</td><td colspan="3"><span class="pill p-x">reverses</span> what the chosen runs changed</td><td><code>list</code>, <code>last</code>, <code>all</code>; then <code>purge</code> deletes the log itself.</td></tr>
+        <tr><td>remove --all</td><td><span class="pill p-r">kept</span></td><td><span class="pill p-x">restores</span> all</td><td class="dash">—</td><td>Run <code>list</code> later to wrap everything again.</td></tr>
+        <tr><td>list</td><td><span class="pill p-r">reads</span></td><td><span class="pill p-w">wraps</span> / re-wraps all listed</td><td class="dash">—</td><td>Asks before a first rename, then shows each tool's status. Use after editing <code>tools.conf</code>. The shell hook does the re-wrap part quietly at every new shell.</td></tr>
+        <tr><td>check</td><td><span class="pill p-r">reads</span></td><td class="dash">—</td><td class="dash">—</td><td>Wall tests from the current directory.</td></tr>
+        <tr><td>ai-sandbox-undo</td><td colspan="3"><span class="pill p-x">reverses</span> what the chosen runs changed</td><td>no argument lists, then <code>last</code>, <code>&lt;RUN&gt;</code>, <code>all</code>; <code>purge</code> deletes the log itself.</td></tr>
       </tbody>
     </table>
     </div>

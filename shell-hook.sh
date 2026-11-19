@@ -7,7 +7,7 @@
 # sits next to it as <prefix><tool>. If an update (e.g. `claude update`)
 # put a new real program over the wrapper, this moves it aside and wraps it
 # again. It is silent unless it had to fix something, and it never asks for
-# sudo (for root-owned folders it only warns: run `ai-sandbox-admin sync`).
+# sudo (for root-owned folders it only warns: run `ai-sandbox-admin list`).
 
 if [ "$(id -u)" != 0 ] && command -v ai-sandbox-admin >/dev/null 2>&1; then
   ai-sandbox-admin verify -q

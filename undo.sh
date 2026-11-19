@@ -3,18 +3,15 @@
 # ai-sandbox-undo — reverse what ai-sandbox / ai-sandbox-admin did, using the
 #                   action log they write
 #
-#   ai-sandbox-undo list              runs that can still be undone
-#   ai-sandbox-undo show [RUN|last]   the changes one run made
-#   ai-sandbox-undo last              undo the newest run
-#   ai-sandbox-undo run RUN           undo one run (by id from `list`)
-#   ai-sandbox-undo all               undo everything, newest first
-#   ai-sandbox-undo log               print the raw log
-#   ai-sandbox-undo prune [DAYS]      free backup space: drop the backups of
-#                                     undone runs (+ runs older than DAYS)
-#   ai-sandbox-undo purge             the very last step, after `all`: delete the
-#                                     log, backups, this tool, aisup.log and the
-#                                     empty folders the sandbox created — your
-#                                     home is then as before the install
+#   ai-sandbox-undo            what can still be undone: each run + its changes
+#   ai-sandbox-undo last       undo the newest run
+#   ai-sandbox-undo RUN        undo one run (id from the list)
+#   ai-sandbox-undo all        undo everything, newest first
+#   ai-sandbox-undo purge      after `all`: delete the log, backups, this tool,
+#                              aisup.log and the empty folders the sandbox
+#                              created — your home is then as before the install.
+#                              Before `all`: only frees space (drops the
+#                              backups of runs already undone)
 #
 # Options (before the command):
 #   -n   dry run: only print what would happen
@@ -61,7 +58,7 @@ while [[ ${1:-} == -* ]]; do
   shift
 done
 
-usage() { sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 
 hash_of() {             # same format as act_hash in lib.sh
   if   [[ -L $1 ]]; then printf 'link:%s' "$(readlink "$1")"
@@ -121,7 +118,7 @@ pick_run() {            # pick_run RUN|last -> run id
     r=$(open_runs | head -1)
     [[ -n $r ]] || die "nothing left to undo"
   fi
-  [[ -n ${R_N[$r]+x} ]] || die "no run '$r' in $LOG (see: ai-sandbox-undo list)"
+  [[ -n ${R_N[$r]+x} ]] || die "no run '$r' in $LOG (see: ai-sandbox-undo)"
   echo "$r"
 }
 
@@ -355,16 +352,11 @@ do_undo() {             # do_undo RUN...
   (( DRY )) || echo "Done."
 }
 
-cmd_prune() {
-  local days=${1:-} cut="" run s
+cmd_prune() {          # drop the backups of runs that are fully undone
+  local run s freed=0
   local -a F
-  if [[ -n $days ]]; then
-    [[ $days =~ ^[0-9]+$ ]] || die "DAYS must be a number"
-    cut=$(date -d "-$days days" +%Y%m%d-%H%M%S)
-  fi
-  local freed=0
   for run in "${RUNS[@]}"; do
-    if (( $(open_count "$run") > 0 )) && [[ -z $cut || ! $run < $cut ]]; then continue; fi
+    (( $(open_count "$run") == 0 )) || continue
     for ((s = 1; s <= ${R_N[$run]}; s++)); do
       IFS=$'\t' read -ra F <<<"${LINE[$run:$s]}"
       case ${F[3]} in replace|remove) ;; *) continue ;; esac
@@ -376,7 +368,6 @@ cmd_prune() {
     done
   done
   echo "$freed backup(s) removed."
-  [[ -z $days ]] || echo "Runs older than $days days can no longer restore the files they overwrote or deleted."
 }
 
 cmd_purge() {
@@ -384,7 +375,9 @@ cmd_purge() {
   local -a F dirs=()
   for run in "${RUNS[@]}"; do n=$((n + $(open_count "$run"))); done
   if (( n && ! FORCE )); then
-    die "$n change(s) are not undone yet. Run 'ai-sandbox-undo all' first (or -f to forget them)."
+    echo "$n change(s) are not undone yet, so only the backups of undone runs go."
+    echo "(Full purge: 'ai-sandbox-undo all' first, or -f to forget them.)"
+    cmd_prune; return
   fi
   # empty folders the sandbox created (their mkdir was undone or kept as "not
   # ours"), and the parents of the state folder itself
@@ -417,29 +410,25 @@ cmd_purge() {
 # -----------------------------------------------------------------------------
 cmd=${1:-}; shift || true
 case $cmd in
-  list)
+  ""|list)
     load
-    printf '%-24s %-19s %-8s %s\n' RUN TIME CHANGES COMMAND
     found=0
     while IFS= read -r run; do
       [[ -n $run ]] || continue
-      found=1
-      printf '%-24s %-19s %-8s %s\n' "$run" "${R_TIME[$run]}" \
-        "$(open_count "$run")/${R_N[$run]}" "${R_DESC[$run]}"
+      found=1; show_run "$run"; echo
     done < <(open_runs)
-    (( found )) || echo "(nothing left to undo)"
+    if (( found )); then echo "Undo with:  ai-sandbox-undo last | <RUN> | all"
+    else echo "(nothing left to undo)"; fi
     ;;
-  show) load; show_run "$(pick_run "${1:-last}")" ;;
   last) load; do_undo "$(pick_run last)" ;;
-  run)  load; [[ -n ${1:-} ]] || die "usage: ai-sandbox-undo run RUN"; do_undo "$(pick_run "$1")" ;;
   all)
     load
     mapfile -t todo < <(open_runs)
     (( ${#todo[@]} )) || { echo "nothing left to undo"; exit 0; }
     do_undo "${todo[@]}"
     ;;
-  log)   [[ -f $LOG ]] || die "no log at $LOG"; cat "$LOG" ;;
-  prune) load; cmd_prune "${1:-}" ;;
   purge) load; cmd_purge ;;
-  *) usage ;;
+  run)  load; [[ -n ${1:-} ]] || usage; do_undo "$(pick_run "$1")" ;;   # old form
+  -h|--help|help) usage ;;
+  *)    load; do_undo "$(pick_run "$cmd")" ;;
 esac
