@@ -139,13 +139,15 @@ That is its only job. Everything else is in `ai-sandbox-admin`.
 | `uninstall` | root → system install; user → user install | Remove the programs. A user uninstall also runs `remove --all` and asks before deleting `~/.config/ai-sandbox`. Before a root uninstall, users should run `remove --all`. |
 | `add [name]` | you | Interactive add (see below). |
 | `remove <name>` | you | Put the real program back (and remove a dpkg diversion), then delete the tool's section. Logged, so `ai-sandbox-undo last` brings it back. Its data is kept. |
+| `update [name]` | you | Change a tool you already added from a menu, without editing `tools.conf`: project, type, add/remove `rw` / `ro` / `rw-file` paths (secrets are refused), args, `env-pass`, aisup, `runs`. Shows the diff, checks it like `add` does, and asks before saving. Logged: `ai-sandbox-undo last` reverses it. The programs (`exec`/`wrapped`) are changed with `remove` + `add`. |
+| `update secrets` | root or you | Same, for the secrets rules: add a `deny`, un-hide a built-in entry with `allow`, or remove a rule. As root it edits `/etc/ai-sandbox/secrets.conf`; as you, `~/.config/ai-sandbox/secrets.conf` (root install: `deny` only). A rule it can't parse is refused before saving. |
 | `remove --all` | you | Put every real program back. The config is kept. |
 | `list` | you | Shows every tool, what it may see (project, `rw`, `ro`, `runs`, aisup) and its status: `boxed` (sandboxed), `not-synced` (in `tools.conf`, not wrapped yet: runs unsandboxed), `replaced` (an update wrote over the wrapper), `orphan` (real program gone), `missing` (not installed), `removed` (taken out with `remove`; shows the `ai-sandbox-undo` id to bring it back). Then offers to wrap the `not-synced`/`replaced` ones (sudo for root-owned folders). Changes nothing unless you say yes. Run it after editing `tools.conf` by hand. |
 | `check` | you | Run the wall tests from the current directory (`AISUP=1` for the supervisor). |
 
 The shell hook does the re-wrap part of `list` silently at every shell start (never with sudo).
 
-`add`, `remove` and `list` refuse to run as root, because the config is per user.
+`add`, `remove`, `update [name]` and `list` refuse to run as root, because the config is per user (`update secrets` is the exception: as root it edits `/etc/ai-sandbox/secrets.conf`).
 
 ### What `add` asks
 

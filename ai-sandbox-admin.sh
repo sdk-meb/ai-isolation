@@ -6,9 +6,13 @@
 #                -> /usr/local, root-owned; as a normal user -> ~/.local)
 #
 #   uninstall        remove the programs (as root: system; as user: yours)
+#   update secrets   change the secrets rules from a menu (as root:
+#                    /etc/ai-sandbox/secrets.conf; as you: your secrets.conf)
 #
 #   --- as your normal user; config: ~/.config/ai-sandbox/ ---
 #   add [name]       interactive: search, pick, answer a few questions
+#   update [name]    change a tool you added (project, folders, args, env,
+#                    aisup, runs) from a menu: no need to edit tools.conf
 #   remove <name>    take a tool out of the sandbox (its data is kept)
 #   remove --all     put every real program back (config kept)
 #   list             every tool, what it may see, and its status (boxed,
@@ -742,7 +746,7 @@ cmd_add() {
   local def name type guess=cli proj_def=cwd project
   def=$(basename "$exe" | tr 'A-Z' 'a-z' | sed 's/\.appimage$//; s/[^a-z0-9_-]/-/g')
   name=$(ask "Profile name (its [section] in tools.conf)" "$def")
-  [[ $name =~ ^[A-Za-z0-9_-]+$ && $name != shell ]] || die "bad name '$name'"
+  [[ $name =~ ^[A-Za-z0-9_-]+$ && $name != shell && $name != secrets ]] || die "bad name '$name' (shell and secrets are reserved)"
   if conf_tools "$TOOLS" | grep -qx -- "$name"; then die "'$name' already exists (remove it first)"; fi
 
   if (( ${#apps[@]} )) || [[ $electron == yes ]]; then guess=gui; fi
@@ -925,12 +929,276 @@ cmd_remove() {
 }
 
 # -----------------------------------------------------------------------------
+# update: change a tool you already added, or the secrets rules, from a menu
+# (no hand-editing; same checks as add; logged, so ai-sandbox-undo reverses it)
+# -----------------------------------------------------------------------------
+# SEC = the lines of the [section] being edited (header excluded, comments kept)
+sec_key() { local l; l=$(trim "${1%%#*}"); if [[ $l == *=* ]]; then trim "${l%%=*}"; fi; }
+sec_val() { local l; l=$(trim "${1%%#*}"); trim "${l#*=}"; }
+sec_all() {      # sec_all KEY -> every value of KEY, space-joined (status 1 if none)
+  local l out="" found=1
+  for l in "${SEC[@]}"; do
+    if [[ $(sec_key "$l") == "$1" ]]; then out+="${out:+ }$(sec_val "$l")"; found=0; fi
+  done
+  printf '%s' "$out"; return $found
+}
+sec_append() {   # sec_append LINE -> after the last non-blank line (keeps the gap before the next section)
+  local i=${#SEC[@]}
+  while (( i > 0 )) && [[ -z $(trim "${SEC[i-1]}") ]]; do i=$((i - 1)); done
+  SEC=("${SEC[@]:0:i}" "$1" "${SEC[@]:i}")
+}
+sec_set() {      # sec_set KEY VALUE -> one KEY line in place of all of them ('' = none)
+  local l done=no
+  local -a out=()
+  for l in "${SEC[@]}"; do
+    if [[ $(sec_key "$l") == "$1" ]]; then
+      if [[ $done == no && -n $2 ]]; then out+=("$1 = $2"); fi
+      done=yes; continue
+    fi
+    out+=("$l")
+  done
+  SEC=("${out[@]}")
+  if [[ $done == no && -n $2 ]]; then sec_append "$1 = $2"; fi
+}
+sec_has() {      # sec_has KEY VALUE -> a KEY line with exactly VALUE exists
+  local l
+  for l in "${SEC[@]}"; do
+    if [[ $(sec_key "$l") == "$1" && $(sec_val "$l") == "$2" ]]; then return 0; fi
+  done
+  return 1
+}
+sec_bounds() {   # sec_bounds FILE NAME -> "HEADER_LINE LAST_LINE" of [NAME]
+  awk -v sec="[$2]" '
+    { t = $0; sub(/#.*/, "", t); gsub(/^[ \t]+|[ \t]+$/, "", t) }
+    t ~ /^\[.*\]$/ { if (s && !e) e = NR - 1; if (t == sec && !s) s = NR }
+    END { if (s) print s, (e ? e : NR) }' "$1"
+}
+sec_show() {     # the section's settings, without comments and blank lines
+  local l
+  for l in "${SEC[@]}"; do
+    l=$(trim "${l%%#*}")
+    [[ -z $l ]] || printf '    %s\n' "$l"
+  done
+}
+
+update_tool() {
+  local name=$1 s e l x p ans key tmp
+  conf_tools "$TOOLS" | grep -qx -- "$name" || die "'$name' is not configured (add it with: ai-sandbox-admin add)"
+  read -r s e < <(sec_bounds "$TOOLS" "$name")
+  local -a SEC=() before=() idx=() items=()
+  mapfile -t SEC < <(sed -n "$((s + 1)),${e}p" "$TOOLS")
+  before=("${SEC[@]}")
+  secrets_load "$(installed_lib)"
+
+  while :; do
+    echo
+    echo "[$name] now:"
+    sec_show
+    echo
+    choose "Change what? " \
+      "project: folder it may write      (now: $(sec_all project || echo cwd))" \
+      "type: cli or gui                  (now: $(sec_all type || echo cli))" \
+      "add a folder or file it may see   (rw / ro / rw-file)" \
+      "remove a setting                  (a path, env-set, exec-allow, ...)" \
+      "program arguments                 (now: $(sec_all args || echo -))" \
+      "env variables passed in           (now: $(sec_all env-pass || echo -))" \
+      "aisup: ask before unknown programs (now: $(sec_all aisup || echo no))" \
+      "other sandboxed tools it may run  (now: $(sec_all runs || echo -))" \
+      "save" \
+      "quit without saving"
+    case $CHOICE_I in
+      0) x=$(ask "Folder it may write (cwd = where it is started)" "$(sec_all project || echo cwd)")
+         if [[ $x != cwd ]]; then
+           p=$(readlink -m -- "$(expand_home "$x")")
+           if [[ $p != /* ]]; then echo "  use cwd, a full path or ~/..."; continue; fi
+           if [[ $p == / || $p == "$HOME" ]]; then echo "  refused: that is your whole home (or /)"; continue; fi
+           if l=$(touches_secret "$p"); then echo "  refused: it would expose the secret $(_show "$l")"; continue; fi
+           x=$(_show "$p")
+         fi
+         sec_set project "$x" ;;
+      1) choose "Type: " "cli (terminal)" "gui (window: Wayland, GPU)"
+         if (( CHOICE_I == 0 )); then sec_set type cli; else sec_set type gui; fi ;;
+      2) x=$(ask "Path it may see (~/... or /..., '-' = cancel)" "-")
+         [[ $x != - ]] || continue
+         p=$(expand_home "$x")
+         if [[ $p != /* ]]; then echo "  use a full path (or ~/...)"; continue; fi
+         p=$(readlink -m -- "$p")
+         rate_path "$p" "$name"
+         if [[ $R_LOCK == missing ]]; then echo "  $(_show "$p") does not exist yet: it will be created as a folder at the first run"
+         elif [[ -n $R_LOCK ]]; then echo "  refused: $R_WHY"; continue; fi
+         if [[ -f $p ]]; then
+           ask_yn "  $(_show "$p") is a file: let it read and write it?" y || continue
+           key=rw-file
+         else
+           ans=$(ask "  $(_show "$p")/  w=read-write r=read-only" w)
+           case $ans in w*) key=rw ;; r*) key=ro ;; *) echo "  nothing added"; continue ;; esac
+         fi
+         if sec_has "$key" "$(_show "$p")"; then echo "  already there"; continue; fi
+         sec_append "$key = $(_show "$p")" ;;
+      3) idx=() items=()
+         for x in "${!SEC[@]}"; do
+           key=$(sec_key "${SEC[x]}")
+           case $key in
+             ''|exec|wrapped|exec-newest) ;;   # the programs: change those with remove + add
+             *) idx+=("$x"); items+=("$(trim "${SEC[x]%%#*}")") ;;
+           esac
+         done
+         (( ${#idx[@]} )) || { echo "  nothing to remove"; continue; }
+         choose_many "Remove which? (one or more, e.g. 1 or 1 3) " "${items[@]}" "cancel"
+         local -a del=() keep=()
+         for x in "${CHOICES[@]}"; do if (( x < ${#idx[@]} )); then del+=("${idx[x]}"); fi; done
+         for x in "${!SEC[@]}"; do [[ " ${del[*]} " == *" $x "* ]] || keep+=("${SEC[x]}"); done
+         SEC=("${keep[@]}") ;;
+      4) x=$(ask "Extra program arguments ('-' = none)" "$(sec_all args || echo -)")
+         [[ $x == - ]] && x=""; sec_set args "$x" ;;
+      5) x=$(ask "Env variables to pass in, e.g. API keys ('-' = none)" "$(sec_all env-pass || echo -)")
+         [[ $x == - ]] && x=""
+         if [[ -n $x && ! $x =~ ^[A-Za-z_][A-Za-z0-9_]*([[:space:]]+[A-Za-z_][A-Za-z0-9_]*)*$ ]]; then
+           echo "  variable NAMES only, space-separated (e.g. ANTHROPIC_API_KEY OPENAI_API_KEY)"; continue
+         fi
+         sec_set env-pass "$x" ;;
+      6) if ask_yn "Ask before it runs unknown programs (aisup)?" "$([[ $(sec_all aisup) == yes ]] && echo y || echo n)"
+         then sec_set aisup yes; else sec_set aisup no; fi ;;
+      7) local others ok=yes b
+         others=$(conf_tools "$TOOLS" | grep -vx -e "$name" -e shell | tr '\n' ' ') || true
+         if [[ -z ${others// /} ]]; then echo "  you have no other sandboxed tools"; continue; fi
+         echo "Your other sandboxed tools: $others"
+         x=$(ask "Tools it may run, with their files ('-' = none)" "$(sec_all runs || echo -)")
+         [[ $x == - ]] && x=""; x=${x//,/ }
+         for b in $x; do
+           if [[ " $others " != *" $b "* ]]; then echo "  no [$b] in $(_show "$TOOLS")"; ok=no; fi
+         done
+         [[ $ok == yes ]] || continue
+         sec_set runs "$(trim "$x")" ;;
+      8) if [[ "${SEC[*]}" == "${before[*]}" && ${#SEC[@]} == "${#before[@]}" ]]; then
+           echo "nothing changed"; return 0
+         fi
+         tmp=$(mktemp)
+         { head -n "$s" "$TOOLS"; printf '%s\n' "${SEC[@]}"; tail -n +"$((e + 1))" "$TOOLS"; } > "$tmp"
+         # same check as at every start
+         if ! conf_load "$tmp" "$name"; then rm -f "$tmp"; echo "  refused (see above): change it and save again"; continue; fi
+         echo
+         diff -u --label "before" --label "after" "$TOOLS" "$tmp" | tail -n +3 || true
+         echo
+         if ! ask_yn "Save this to $(_show "$TOOLS")?" y; then rm -f "$tmp"; continue; fi
+         act_write "$TOOLS" keep < "$tmp" || { rm -f "$tmp"; die "could not write $TOOLS"; }
+         rm -f "$tmp"
+         echo "saved [$name] (undo: ai-sandbox-undo last). It applies from the next start of '$name'."
+         return 0 ;;
+      *) echo "nothing saved"; return 0 ;;
+    esac
+  done
+}
+
+# update secrets: as root /etc/ai-sandbox/secrets.conf (deny | allow);
+# as you ~/.config/ai-sandbox/secrets.conf (root install: deny only)
+update_secrets() {
+  local file words mode kind lib x p tmp l i
+  if (( EUID == 0 )); then
+    file=$SECRETS_CONF words="deny allow" mode=644 kind=etc
+    act_mkdir "$(dirname "$file")" 755
+  else
+    runner >/dev/null || die "not installed yet: run  bash install.sh  in the source folder (as root preferred)"
+    ensure_conf "$CONF" "$(installed_lib)"
+    file=$SECRETS_USER_CONF mode=600 words="deny allow" kind=user
+    if [[ $(readlink -m -- "$(installed_lib)") == "$SECRETS_ROOT_LIB" ]]; then words=deny kind=user-root; fi
+  fi
+  ensure_secrets_conf "$file" "$kind" "$mode"
+  lib=$(installed_lib)
+  local -a LINES=() before=() builtin=() rules=() ri=() items=()
+  mapfile -t LINES < "$file"
+  before=("${LINES[@]}")
+  SECRETS=()
+  secrets_parse "$lib/secrets.list" deny || die "fix $lib/secrets.list first"
+  for p in "${SECRETS[@]}"; do builtin+=("$(_show "$p")"); done
+
+  while :; do
+    rules=() ri=()
+    for i in "${!LINES[@]}"; do
+      l=$(trim "${LINES[i]%%#*}")
+      [[ -z $l ]] || { rules+=("$l"); ri+=("$i"); }
+    done
+    echo
+    echo "$(_show "$file")  (${#builtin[@]} built-in entries in $(_show "$lib/secrets.list"))"
+    if (( ${#rules[@]} )); then printf '    %s\n' "${rules[@]}"; else echo "    (no rules of your own yet)"; fi
+    echo
+    items=("hide a path from every tool (deny)")
+    if [[ $words == *allow* ]]; then items+=("un-hide a built-in entry (allow)"); else items+=("(allow: only root can, in $SECRETS_CONF)"); fi
+    items+=("remove a rule" "show the built-in list" "save" "quit without saving")
+    choose "Change what? " "${items[@]}"
+    case $CHOICE_I in
+      0) x=$(ask "Path to hide (~/... or /..., '-' = cancel)" "-")
+         [[ $x != - ]] || continue
+         p=$(expand_home "$x")
+         if [[ $p != /* || $p == / ]]; then echo "  use a full path (or ~/...)"; continue; fi
+         x="deny $(_show "$(readlink -m -- "$p")")"
+         if [[ " ${rules[*]} " == *" $x "* ]]; then echo "  already there"; continue; fi
+         LINES+=("$x") ;;
+      1) [[ $words == *allow* ]] || { echo "  your file may only ADD secrets: ask root to put 'allow PATH' in $SECRETS_CONF"; continue; }
+         echo "Built-in entries (exact path only):"
+         choose "Un-hide which? " "${builtin[@]}" "cancel"
+         (( CHOICE_I < ${#builtin[@]} )) || continue
+         x="allow ${builtin[CHOICE_I]}"
+         echo "  warning: every tool may then be given ${builtin[CHOICE_I]} (it is a known secret location)"
+         ask_yn "  Un-hide it?" n || continue
+         LINES+=("$x") ;;
+      2) (( ${#rules[@]} )) || { echo "  no rules to remove"; continue; }
+         choose_many "Remove which? (one or more, e.g. 1 or 1 3) " "${rules[@]}" "cancel"
+         local -a del=() keep=()
+         for x in "${CHOICES[@]}"; do if (( x < ${#ri[@]} )); then del+=("${ri[x]}"); fi; done
+         for x in "${!LINES[@]}"; do [[ " ${del[*]} " == *" $x "* ]] || keep+=("${LINES[x]}"); done
+         LINES=("${keep[@]}") ;;
+      3) printf '    %s\n' "${builtin[@]}" ;;
+      4) if [[ "${LINES[*]}" == "${before[*]}" && ${#LINES[@]} == "${#before[@]}" ]]; then
+           echo "nothing changed"; return 0
+         fi
+         tmp=$(mktemp)
+         printf '%s\n' "${LINES[@]}" > "$tmp"
+         # a line it doesn't understand would stop EVERY tool: check first
+         if ! ( SECRETS=(); secrets_parse "$tmp" "$words" ); then rm -f "$tmp"; echo "  refused (see above)"; continue; fi
+         echo
+         diff -u --label "before" --label "after" "$file" "$tmp" | tail -n +3 || true
+         echo
+         if ! ask_yn "Save this to $(_show "$file")?" y; then rm -f "$tmp"; continue; fi
+         act_write "$file" "$mode" < "$tmp" || { rm -f "$tmp"; die "could not write $file"; }
+         rm -f "$tmp"
+         if ( secrets_load "$lib" ) >/dev/null; then
+           echo "saved (undo: ai-sandbox-undo last). It applies from the next start of each tool."
+         else
+           warn "saved, but the secrets rules don't load now, so NO tool starts. Undo: ai-sandbox-undo last"
+         fi
+         return 0 ;;
+      *) echo "nothing saved"; return 0 ;;
+    esac
+  done
+}
+
+cmd_update() {
+  local name=${1:-}
+  if [[ $name == secrets ]]; then update_secrets; return; fi
+  (( EUID != 0 )) || die "as root only:  ai-sandbox-admin update secrets   ($SECRETS_CONF). Tools are per user: run update as the user."
+  runner >/dev/null || die "not installed yet: run  bash install.sh  in the source folder (as root preferred)"
+  ensure_conf "$CONF" "$(installed_lib)"
+  if [[ -z $name ]]; then
+    local -a names=()
+    mapfile -t names < <(conf_tools "$TOOLS" | grep -vx shell || true)
+    echo "What do you want to change?"
+    choose "Pick one: " "${names[@]}" "secrets rules (paths no tool may ever see)" "cancel"
+    if   (( CHOICE_I <  ${#names[@]} )); then name=${names[CHOICE_I]}
+    elif (( CHOICE_I == ${#names[@]} )); then update_secrets; return
+    else echo "cancelled"; return 0; fi
+  fi
+  update_tool "$name"
+}
+
+# -----------------------------------------------------------------------------
 act_begin "ai-sandbox-admin $*"
 case "${1:-}" in
   install)   cmd_install ;;   # internal: what install.sh runs (source folder only)
   uninstall) cmd_uninstall ;;
   add)       shift; cmd_add "${1:-}" ;;
   remove)    shift; cmd_remove "${1:-}" ;;
+  update)    shift; cmd_update "${1:-}" ;;
   list)      cmd_list ;;
   check)     cmd_check ;;
   # internal, not for users: the shell hook calls `verify -q` at every shell start
@@ -942,5 +1210,5 @@ case "${1:-}" in
   reset)     deprecated reset "ai-sandbox-admin remove --all"; cmd_reset ;;
   search)    deprecated search "ai-sandbox-admin add (it searches first)"; shift; cmd_search "${1:-}" ;;
   # ------------------------------------------------------------------
-  *) sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) awk 'NR > 2 && /^# =+$/ { exit } NR > 2' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
