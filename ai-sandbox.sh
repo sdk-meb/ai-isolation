@@ -310,7 +310,8 @@ for f in "${T_RWFILE[@]}"; do bind_file "$f"; done
 # A script in your home (e.g. an npm package's index.js) also gets its folder,
 # read-only, unless that folder is your home, a secret, the project or one of
 # this tool's writable paths. Their data: only with `runs = <tool>` (section 1).
-other_programs() {   # -> "real<TAB>exec<TAB>wrapped<TAB>dir" per program
+other_programs() {   # -> "real|exec|wrapped|dir (\x1f-separated: a tab
+                     # would merge empty fields in `read`)" per program
   local n j e r d
   for n in $(conf_tools "$CONF/tools.conf"); do
     [[ $n != "$NAME" ]] || continue
@@ -322,7 +323,7 @@ other_programs() {   # -> "real<TAB>exec<TAB>wrapped<TAB>dir" per program
         [[ -f $r && -x $r ]] && ! is_wrapper "$r" || continue
         d=""
         if [[ $r == "$HOME"/* && $(head -c 2 "$r" 2>/dev/null) == '#!' ]]; then d=$(dirname "$r"); fi
-        printf '%s\t%s\t%s\t%s\n' "$r" "$e" "${T_WRAPS[j]:-}" "$d"
+        printf '%s\x1f%s\x1f%s\x1f%s\n' "$r" "$e" "${T_WRAPS[j]:-}" "$d"
       done )
   done
 }
@@ -345,34 +346,58 @@ while IFS= read -r l; do OTHER+=("$l"); done < <(other_programs)
 # bound into it earlier (e.g. ~/.local/bin would bring back a wrapper)
 SHOWN=()
 for l in "${OTHER[@]}"; do
-  IFS=$'\t' read -r r e w d <<<"$l"
+  IFS=$'\x1f' read -r r e w d <<<"$l"
   [[ -n $d ]] || continue
   if dir_ok "$d"; then add --ro-bind "$d" "$d"; SHOWN+=("$d")
   else warn "[$NAME] other tool's program $r: its folder $d can't be shown inside — it may not run there"; fi
 done
 in_shown() { local s; for s in "${SHOWN[@]}"; do if [[ $1 == "$s"/* ]]; then return 0; fi; done; return 1; }
-# a path in your (empty) home becomes a SYMLINK to the real program, as on
-# the host: npm-style scripts find their modules through their own symlink.
-# Anywhere else (e.g. /usr/bin, or inside a folder shown above, where the
-# wrapper file already exists) the real program is bound over that path.
-link_or_bind() {   # link_or_bind REAL PATH
-  if [[ $2 == "$HOME"/* ]] && ! in_shown "$2"; then add --symlink "$1" "$2"
-  else add --ro-bind "$1" "$2"; fi
+# from_host PATH -> PATH comes from the host inside (outside the empty home,
+# or under the project / an ro / rw / shown folder), i.e. it already exists
+# there exactly as it does outside
+from_host() {
+  local s
+  [[ $1 == "$HOME"/* ]] || return 0
+  for s in "$PROJECT" "${T_RO[@]}" "${T_RW[@]}" "${SHOWN[@]}"; do
+    if [[ $1 == "$s"/* ]]; then return 0; fi
+  done
+  return 1
+}
+# put_prog MODE REAL PATH: make PATH run REAL inside.
+# - PATH comes from the host and is a SYMLINK (e.g. /usr/bin/.ai-real-x ->
+#   /usr/share/...): leave it, it already leads to REAL. bwrap can't mount
+#   onto it anyway: it resolves absolute links before the new root exists
+#   ("Can't create file at ..."). If it leads elsewhere (an older version),
+#   REAL is mounted over that target instead.
+# - PATH comes from the host as a file (a wrapper): REAL is mounted over it.
+# - PATH is in the empty home: MODE=link makes a SYMLINK to REAL, as on the
+#   host (npm-style scripts find their modules through it); MODE=bind mounts.
+put_prog() {
+  local mode=$1 real=$2 p=$3 t
+  if from_host "$p"; then
+    if [[ -L $p ]]; then
+      t=$(readlink -f -- "$p" 2>/dev/null) || t=""
+      if [[ -n $t && $t != "$real" && -f $t ]]; then add --ro-bind "$real" "$t"; fi
+    else
+      add --ro-bind "$real" "$p"
+    fi
+  elif [[ $mode == link ]]; then add --symlink "$real" "$p"
+  else add --ro-bind "$real" "$p"; fi
 }
 for l in "${OTHER[@]}"; do
-  IFS=$'\t' read -r r e w d <<<"$l"
+  IFS=$'\x1f' read -r r e w d <<<"$l"
   if [[ -z $d ]] || ! in_shown "$r"; then add --ro-bind "$r" "$r"; fi
-  if [[ $e != "$r" ]]; then link_or_bind "$r" "$e"; fi
-  if [[ -n $w ]]; then link_or_bind "$r" "$w"; fi
+  if [[ $e != "$r" ]]; then put_prog link "$r" "$e"; fi
+  if [[ -n $w ]]; then put_prog link "$r" "$w"; fi
   ALSO+=("$r" "$e" ${w:+"$w"})
 done
 
 # the program itself (read-only), also under the name it was configured with
 add --ro-bind "$REAL" "$REAL"
-if [[ $T_EXEC != "$REAL" ]]; then add --ro-bind "$REAL" "$T_EXEC"; fi
+if [[ $T_EXEC != "$REAL" ]]; then put_prog bind "$REAL" "$T_EXEC"; fi
 # renamed tool: inside, the ORIGINAL path is the real program again (the
 # wrapper only exists outside), so the tool can still call itself by name
-if [[ -n $T_WRAPPED ]]; then add --ro-bind "$REAL" "$T_WRAPPED"; fi
+if [[ -n $T_WRAPPED ]]; then put_prog bind "$REAL" "$T_WRAPPED"; fi
 # the tool's OTHER wrapped programs: same, so they can call each other
 # (e.g. a CLI script that runs the app binary next to it)
 for j in "${!T_WRAPS[@]}"; do
@@ -382,8 +407,8 @@ for j in "${!T_WRAPS[@]}"; do
     warn "[$NAME] ${T_WRAPS[j]}: real program ${T_EXECS[j]} missing or a wrapper — not available inside"
     continue
   fi
-  add --ro-bind "$r" "$r" --ro-bind "$r" "${T_WRAPS[j]}"
-  if [[ ${T_EXECS[j]} != "$r" ]]; then add --ro-bind "$r" "${T_EXECS[j]}"; fi
+  add --ro-bind "$r" "$r"; put_prog bind "$r" "${T_WRAPS[j]}"
+  if [[ ${T_EXECS[j]} != "$r" ]]; then put_prog bind "$r" "${T_EXECS[j]}"; fi
   ALSO+=("$r" "${T_EXECS[j]}")
 done
 
