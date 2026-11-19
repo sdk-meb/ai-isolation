@@ -42,6 +42,8 @@ set -euo pipefail
 
 die()  { echo "ai-sandbox-undo: $*" >&2; exit 1; }
 warn() { echo "ai-sandbox-undo: warning: $*" >&2; }
+# deprecated OLD NEW -> warn once; the old form still works until it is removed
+deprecated() { echo "ai-sandbox-undo: '$1' is deprecated and will be removed in a future version; use: $2" >&2; }
 
 if (( EUID == 0 )); then STATE=/var/lib/ai-sandbox
 else STATE=${XDG_STATE_HOME:-$HOME/.local/state}/ai-sandbox; fi
@@ -352,11 +354,15 @@ do_undo() {             # do_undo RUN...
   (( DRY )) || echo "Done."
 }
 
-cmd_prune() {          # drop the backups of runs that are fully undone
-  local run s freed=0
+cmd_prune() {          # cmd_prune [DAYS] -> drop the backups of runs that are fully undone
+  local days=${1:-} cut="" run s freed=0
   local -a F
+  if [[ -n $days ]]; then    # DEPRECATED: DAYS (only reachable through `prune DAYS`)
+    [[ $days =~ ^[0-9]+$ ]] || die "DAYS must be a number"
+    cut=$(date -d "-$days days" +%Y%m%d-%H%M%S)
+  fi
   for run in "${RUNS[@]}"; do
-    (( $(open_count "$run") == 0 )) || continue
+    if (( $(open_count "$run") > 0 )) && [[ -z $cut || ! $run < $cut ]]; then continue; fi
     for ((s = 1; s <= ${R_N[$run]}; s++)); do
       IFS=$'\t' read -ra F <<<"${LINE[$run:$s]}"
       case ${F[3]} in replace|remove) ;; *) continue ;; esac
@@ -368,6 +374,7 @@ cmd_prune() {          # drop the backups of runs that are fully undone
     done
   done
   echo "$freed backup(s) removed."
+  [[ -z $days ]] || echo "Runs older than $days days can no longer restore the files they overwrote or deleted."
 }
 
 cmd_purge() {
@@ -411,6 +418,7 @@ cmd_purge() {
 cmd=${1:-}; shift || true
 case $cmd in
   ""|list)
+    [[ $cmd != list ]] || deprecated list "ai-sandbox-undo"
     load
     found=0
     while IFS= read -r run; do
@@ -420,7 +428,7 @@ case $cmd in
     if (( found )); then echo "Undo with:  ai-sandbox-undo last | <RUN> | all"
     else echo "(nothing left to undo)"; fi
     ;;
-  last) load; do_undo "$(pick_run last)" ;;
+  last) load; r=$(pick_run last) || exit 1; do_undo "$r" ;;
   all)
     load
     mapfile -t todo < <(open_runs)
@@ -428,7 +436,16 @@ case $cmd in
     do_undo "${todo[@]}"
     ;;
   purge) load; cmd_purge ;;
-  run)  load; [[ -n ${1:-} ]] || usage; do_undo "$(pick_run "$1")" ;;   # old form
+  # --- DEPRECATED: still work, will be removed in a future version ---
+  run)   deprecated "run RUN" "ai-sandbox-undo RUN"
+         load; [[ -n ${1:-} ]] || usage; r=$(pick_run "$1") || exit 1; do_undo "$r" ;;
+  show)  deprecated show "ai-sandbox-undo (lists every run with its changes)"
+         load; r=$(pick_run "${1:-last}") || exit 1; show_run "$r" ;;
+  log)   deprecated log "cat $LOG"
+         [[ -f $LOG ]] || die "no log at $LOG"; cat "$LOG" ;;
+  prune) deprecated "prune [DAYS]" "ai-sandbox-undo purge (before 'all' it only frees backups)"
+         load; cmd_prune "${1:-}" ;;
+  # ------------------------------------------------------------------
   -h|--help|help) usage ;;
-  *)    load; do_undo "$(pick_run "$cmd")" ;;
+  *)    load; r=$(pick_run "$cmd") || exit 1; do_undo "$r" ;;   # a RUN id
 esac

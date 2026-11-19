@@ -58,6 +58,9 @@ installed_lib() { if [[ -x $SYS_BIN/ai-sandbox ]]; then echo "$SYS_LIB"
                   elif [[ -x $USR_BIN/ai-sandbox ]]; then echo "$USR_LIB"
                   else echo "$SRC"; fi; }
 
+# deprecated OLD NEW -> warn; the old form still works until it is removed
+deprecated() { echo "ai-sandbox-admin: '$1' is deprecated and will be removed in a future version; use: $2" >&2; }
+
 need_user() {
   [[ $EUID -ne 0 ]] || die "run this as your normal user: the config is per user (~/.config/ai-sandbox)"
 }
@@ -124,6 +127,14 @@ search_desktop() {
     if grep -qx 'X-AI-Sandbox=true' "$f"; then continue; fi       # one of ours
     if grep -qiE "^(Name|Exec)=.*$1" "$f"; then echo "$f"; fi
   done
+}
+
+# DEPRECATED: only reachable through `ai-sandbox-admin search`
+cmd_search() {
+  local q=${1:-}
+  [[ $q =~ ^[A-Za-z0-9._-]+$ ]] || die "usage: ai-sandbox-admin search <name>"
+  echo "Programs:";       search_bins "$q"    | sed 's/^/  /'
+  echo "Menu launchers:"; search_desktop "$q" | sed 's/^/  /'
 }
 
 # -----------------------------------------------------------------------------
@@ -909,9 +920,14 @@ case "${1:-}" in
   remove)    shift; cmd_remove "${1:-}" ;;
   list)      cmd_list ;;
   check)     cmd_check ;;
-  # internal / old names: the shell hook calls `verify -q`; old wrappers say `reset`
+  # internal, not for users: the shell hook calls `verify -q` at every shell start
   verify)    shift; cmd_verify "${1:-}" ;;
-  sync)      cmd_sync ;;
-  reset)     cmd_reset ;;
+  # --- DEPRECATED: still work, will be removed in a future version ---
+  # (`reset` is named in the comment of wrappers made so far; keep it until
+  #  those are gone or the wrapper text is changed)
+  sync)      deprecated sync "ai-sandbox-admin list"; cmd_sync ;;
+  reset)     deprecated reset "ai-sandbox-admin remove --all"; cmd_reset ;;
+  search)    deprecated search "ai-sandbox-admin add (it searches first)"; shift; cmd_search "${1:-}" ;;
+  # ------------------------------------------------------------------
   *) sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

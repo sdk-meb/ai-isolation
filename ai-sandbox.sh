@@ -89,8 +89,15 @@ run_nested() {   # run_nested [--via ORIG] <tool> [args...]
   exec "$real" "$@"
 }
 # `ai-sandbox run <tool>` (what wrappers call) == `ai-sandbox <tool>`
-if [[ ${1:-} == run ]]; then shift
-elif [[ ${1:-} == list || ${1:-} == check ]]; then die "that is now:  ai-sandbox-admin $1"; fi
+if [[ ${1:-} == run ]]; then shift; fi
+# DEPRECATED: `ai-sandbox list` / `ai-sandbox check` still work, will be
+# removed in a future version: use `ai-sandbox-admin list|check`
+case ${1:-} in list|check)
+  echo "ai-sandbox: '$1' is deprecated and will be removed in a future version; use: ai-sandbox-admin $1" >&2
+  ensure_conf "$CONF" "$LIB"
+  if [[ $1 == list ]]; then list_tools "$CONF/tools.conf"; exit 0; fi
+  AI_SANDBOX_BIN="$SELF" exec bash "$LIB/check.sh" ;;
+esac
 [[ -n ${1:-} && ${1:-} != -h && ${1:-} != --help ]] \
   || die "usage: ai-sandbox <tool> [args...]   (manage tools: ai-sandbox-admin)"
 if inside_sandbox; then run_nested "$@"; fi
