@@ -36,7 +36,7 @@ ai-sandbox run <tool> [args]    reads ~/.config/ai-sandbox/tools.conf
 Root install: `/usr/local/bin/ai-sandbox`. User install: `~/.local/bin/ai-sandbox`.
 
 - Inside the sandbox the original path is the real program again, so a tool can still call itself by name.
-- **A tool calling another sandboxed tool** (e.g. `claude` runs `copilot`): no second sandbox. Every other tool in your `tools.conf` has its real program mounted read-only at its original path (`~/.local/bin/copilot` is a symlink to the real program inside, as on the host; a script in your home also gets its own folder, read-only). So calling it just runs the original program, behind the **caller's** walls (never more than that). It does **not** get its own data dirs (per-tool isolation), so it may need to log in again or get a token through `env-pass` (e.g. `GH_TOKEN`). If a wrapper is still reached somehow, the launcher sees it is already inside (marker `/run/.ai-sandbox` + pid 1 is `bwrap`) and runs the real program directly. `$AI_SANDBOX` names the outer tool.
+- **A tool calling another sandboxed tool** (e.g. `code` runs `copilot`, or a CLI runs a GUI app): no second sandbox. Every other tool in your `tools.conf` has its real program mounted read-only at its original path (`~/.local/bin/copilot` is a symlink to the real program inside, as on the host; a script in your home also gets its own folder, read-only). So calling it just runs the original program, behind the **caller's** walls. To give it its files too, list it in the caller's **`runs =`** (see [`tools.conf`](#toolsconf)); otherwise it may need to log in again or get a token through `env-pass` (e.g. `GH_TOKEN`). If a wrapper is still reached somehow, the launcher sees it is already inside (marker `/run/.ai-sandbox` + pid 1 is `bwrap`) and runs the real program directly. `$AI_SANDBOX` names the outer tool.
 - **Updates:** run the real one outside the sandbox, e.g. `~/.local/bin/.ai-real-claude update`. If an update writes a new program over the wrapper (e.g. `npm install -g` of a newer version), the shell hook (`ai-sandbox-admin verify -q`, at every shell start) moves it aside and wraps it again.
 - **Root-owned folders** (e.g. `/usr/share/cursor`): `sync`/`add` use `sudo`. A file owned by a Debian package is moved with `dpkg-divert`, so `apt upgrade` installs new versions to `.ai-real-<tool>` and **never touches the wrapper**. See [Updates, packages and secrets](#updates-packages-and-secrets).
 - Arguments pass through unchanged (`claude --resume`, `cursor .`).
@@ -165,15 +165,15 @@ claude                   # sandboxed
       4  dir   ..... 0/5    ~/.config/github-copilot/
                               SECRET (~/.config/github-copilot) - never visible inside  -> suggested: BLOCKED
    ```
-   Importance: **5** main config dir (`~/.<name>`, `~/.config/<Name>`), **4** config file or `~/.local/share/<name>`, **3** `~/.local/state`, **2** cache (rebuilt each run if skipped) or a plain non-dot folder, **1** the name only *contains* the term (probably another program), **0** blocked. Anything you skip is gone after each run, because `$HOME` inside is an empty tmpfs. **Blocked** entries can't be picked: a known secret (the same list the launcher uses) or another tool's data. Answer **Enter** to take all suggestions, or **n** to decide each one (folder: `w` read-write / `r` read-only / `n` skip; file: `w` / `n`). Then you can **add paths by hand** (e.g. a folder nested elsewhere). Those are checked the same way, and a path that doesn't exist yet is created at the first run.
+   Importance: **5** main config dir (`~/.<name>`, `~/.config/<Name>`), **4** config file or `~/.local/share/<name>`, **3** `~/.local/state`, **2** cache (rebuilt each run if skipped) or a plain non-dot folder, **1** the name only *contains* the term (probably another program), **0** blocked (a secret). Anything you skip is gone after each run, because `$HOME` inside is an empty tmpfs. **Blocked** entries can't be picked: a known secret (the same list the launcher uses). A path another tool already uses **can** be picked: it shows `hint: SHARED with [tool], both will see it`. Answer **Enter** to take all suggestions, or **n** to decide each one (folder: `w` read-write / `r` read-only / `n` skip; file: `w` / `n`). Then you can **add paths by hand** (e.g. a folder nested elsewhere). Those are checked the same way, and a path that doesn't exist yet is created at the first run.
 5. **The move.** Prefix for the real program (default `.ai-real-`), then a confirmation: `<path>` → `<dir>/.ai-real-<name>`, wrapper at `<path>`, for each picked program. How it moves:
    - a file **owned by a Debian package** → `dpkg-divert --rename` (with sudo), so package upgrades go to `.ai-real-<name>`;
    - any other file in a folder you can't write → `sudo mv`;
    - your own files → plain `mv`.
 5b. **Program folder (home installs only).** If the program lives in your home, it offers read-only access to its folder. For an npm package it offers the whole package folder (`…/node_modules/<pkg>`). If the program is a symlink into a `versions/` folder (Claude Code style: `~/.local/bin/claude` → `~/.local/share/claude/versions/<ver>`), or sits in one, it also adds `exec-newest = <that folder>/*`.
-6. **Extra arguments and environment variables to pass in.** Menu launchers need nothing: they start the original path, which is now the wrapper. For Electron apps the suggested arguments are `--ozone-platform=wayland --password-store=basic`.
+6. **Extra arguments, environment variables, and the tools it runs.** `Tools it may run, with their files` lists your other tools; the names you give become `runs =`. Menu launchers need nothing: they start the original path, which is now the wrapper. For Electron apps the suggested arguments are `--ozone-platform=wayland --password-store=basic`.
 7. **aisup:** yes or no. For a GUI app outside your home, `exec-allow = <app dir>/*` is added automatically.
-8. **Save.** It shows the new `[section]` and runs the same checks as the launcher (so a section that would see another tool's data is refused before anything is saved). If you confirm, it appends the section to your `tools.conf` and does the move(s).
+8. **Save.** It shows the new `[section]` and runs the same checks as the launcher (files shared with another tool only print a hint). If you confirm, it appends the section to your `tools.conf` and does the move(s).
 
 ---
 
@@ -194,6 +194,7 @@ env-pass = ANTHROPIC_API_KEY      # copied in from your environment
 exec-allow = /usr/share/x/*       # extra aisup allow rule                (repeatable)
 exec-newest = ~/.local/share/claude/versions/*   # run the newest version found there
 aisup = no                        # yes = run under the exec supervisor
+runs = copilot                    # other sandboxed tools it starts (see below)
 ```
 
 - `#` starts a comment anywhere on a line.
@@ -208,6 +209,16 @@ aisup = no                        # yes = run under the exec supervisor
   wrapped = /usr/share/devin-desktop/bin/devin-desktop
   ```
   An extra program's wrapper runs `ai-sandbox run --via <its path> <tool>`, and the launcher only accepts a `--via` path listed in that section. Inside the sandbox every `wrapped` path is its real program again, so the programs can call each other (the CLI script runs the app binary, not a second sandbox). `sync`, `verify`, `remove` and `reset` handle every pair.
+- **`runs = B C …`**: this tool starts those sandboxed tools (an editor runs `copilot`, a CLI runs a GUI app). They run inside *this* tool's sandbox, so it also gets their `rw`, `rw-file`, `ro`, `env-set`, `env-pass` and `exec-allow`, all through the same secret checks. If one of them is `type = gui`, a `cli` tool also gets the GUI parts (Wayland socket, GPU, `/sys` read-only, runtime dir; its `/tmp` stays fresh). With no Wayland session it warns and starts anyway, without them. An unknown name is ignored with a warning.
+  ```ini
+  [code]
+  wrapped = /usr/bin/code
+  exec = /usr/bin/.ai-real-code
+  type = gui
+  rw = ~/.config/Code
+  runs = copilot          # copilot inside VS Code finds its login in ~/.copilot
+  ```
+- **Several tools may use the same files** (`[code]` and `[copilot]` both `rw = ~/.copilot`). That is allowed. `add`, `sync` and `verify` print `hint: [x] '~/.copilot' is shared with [y]: both tools see it`; the launcher says nothing.
 - `desktop =` (old design) is ignored.
 
 The default tools:
@@ -239,7 +250,7 @@ The default tools:
   - **`~/.config/ai-sandbox/secrets.conf`**: your own rules, created by `sync` (mode `600`, never visible inside the sandbox). In a **root install it takes only `deny`**: it is your file, so a rule there may add secrets but never remove one (an `allow` line stops every tool from starting, with a message). In a user install it takes `deny` and `allow`.
 - **It fails closed.** No tool starts if `secrets.list` is missing, has no `deny` line, has a line it doesn't understand, or isn't a full path, or if it or any folder above it is writable by group/others (a sticky root folder like `/tmp` is fine). In a root install it must also be owned by root. The same goes for `/etc/ai-sandbox/secrets.conf` if it exists: it must be root-owned and not group/world-writable, otherwise nothing starts (before, it was only ignored with a warning). A missing or tampered list never means "no secrets". `ai-sandbox-admin add` uses the same list to mark paths as BLOCKED.
 - **The list is not complete.** It names known locations. A tool that stores its token somewhere else is not protected, so keep `rw`/`ro` narrow.
-- **AI tool data is isolated per tool. A tool may only see its own data dir.** If a tool's `rw`, `rw-file`, `ro` or `project` (fixed, or the folder you start a `cwd` tool in) is, contains or sits inside a path another tool lists as `rw`, `rw-file` or `ro`, it is refused. For example, `[claude]` with `rw = ~/.copilot` is refused. Symlinks are resolved first. The check runs in the launcher and in `ai-sandbox-admin add`/`sync`. Unlike the secrets list it has no exceptions: `/etc/ai-sandbox/secrets.conf` cannot `allow` it. Editor data such as `~/.config/Code` is protected this way, not by the secrets list: give the editor its own entry (`[code]` with `rw = ~/.config/Code`) and no other tool can get it. **Without such an entry nothing guards `~/.config/Code`**, and it can hold tokens (VS Code started with `--password-store=basic` keeps them there in an easily decrypted file).
+- **AI tool data is per tool by default, and shared only where you say so.** A tool sees only the paths in its own section (and those of the tools in its `runs =`). If its `rw`, `rw-file`, `ro` or fixed `project` is, contains or sits inside a path another tool lists, that is allowed, and `add`/`sync` show a **hint** (`… is shared with [tool]: both tools see it`), so a shared login (e.g. `~/.copilot` for `[code]` and `[copilot]`) is always a visible choice. Symlinks are resolved first. A `cwd` project inside another tool's data is not refused either. Editor data such as `~/.config/Code` is not on the secrets list: give the editor its own entry (`[code]` with `rw = ~/.config/Code`), and any other tool that lists it shows up with a hint. **Nothing guards `~/.config/Code` against a tool you give it to**, and it can hold tokens (VS Code started with `--password-store=basic` keeps them there in an easily decrypted file).
 - **The list protects you only in a root install.** In a user install `secrets.list` is in `~/.local/lib/ai-sandbox`, owned by you, and so is the launcher that reads it, so any program running as you can edit either one (tested: removing `~/.ssh` made the key readable).
 
 ## What every tool gets

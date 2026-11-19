@@ -45,7 +45,7 @@ conf_load() {
   # T_EXECS[i] is the real program behind the wrapper at T_WRAPS[i].
   # T_EXEC/T_WRAPPED = the first pair (the main program).
   T_EXEC="" T_TYPE=cli T_PROJECT=cwd T_AISUP=no T_WRAPPED="" T_EXECNEWEST=""
-  T_EXECS=() T_WRAPS=() T_ARGS=() T_RO=() T_RW=() T_RWFILE=() T_ENVSET=() T_ENVPASS=() T_EXECALLOW=() T_DESKTOP=()
+  T_EXECS=() T_WRAPS=() T_RUNS=() T_ARGS=() T_RO=() T_RW=() T_RWFILE=() T_ENVSET=() T_ENVPASS=() T_EXECALLOW=() T_DESKTOP=()
 
   while IFS= read -r line || [[ -n $line ]]; do
     line=$(trim "${line%%#*}")                     # drop comments + spaces
@@ -76,6 +76,7 @@ conf_load() {
       rw-file)    T_RWFILE+=("$val") ;;
       env-set)    T_ENVSET+=("$val") ;;
       exec-allow) T_EXECALLOW+=("$val") ;;
+      runs)       read -ra words <<<"$val"; T_RUNS+=("${words[@]}") ;;
       desktop)    T_DESKTOP+=("$val") ;;
       *) echo "tools.conf [$want]: unknown key '$key'" >&2; return 2 ;;
     esac
@@ -84,7 +85,7 @@ conf_load() {
     echo "tools.conf [$want]: ${#T_EXECS[@]} 'exec' but ${#T_WRAPS[@]} 'wrapped' lines — each wrapped program needs its own exec" >&2
     return 2
   fi
-  if (( found == 0 )); then conf_check_isolation "$file" "$want" || return 2; fi
+  if (( found == 0 )); then conf_shared_hints "$file" "$want"; fi
   return $found
 }
 
@@ -243,13 +244,14 @@ conf_data_paths() {
   done < "$1"
 }
 
-# conf_check_isolation FILE NAME  ->  AI tool data is isolated per tool: a tool
-# may only see its own data dir. Refuses if any rw, rw-file, ro or fixed
-# project of [NAME] is, contains or sits inside a path another tool lists as
-# rw, rw-file or ro (e.g. [claude] rw = ~/.copilot). Symlinks are resolved
-# first. No exception list: neither `ai-sandbox-admin add` nor secrets.conf
-# can turn this off. Uses the T_* variables conf_load just filled.
-conf_check_isolation() {
+# conf_shared_hints FILE NAME  ->  several tools may use the same files (e.g.
+# vscode and copilot both rw = ~/.copilot). That is allowed; this only prints
+# a hint for each rw, rw-file, ro or fixed project of [NAME] that is, contains
+# or sits inside a path another tool lists, so you know it is shared.
+# Silent when CONF_HINTS=0 (the launcher: it would say it at every start).
+# Symlinks are resolved first. Uses the T_* variables conf_load just filled.
+conf_shared_hints() {
+  [[ ${CONF_HINTS:-1} != 0 ]] || return 0
   local file=$1 want=$2 w rw owner path rp
   local -a mine=("${T_RW[@]}" "${T_RWFILE[@]}" "${T_RO[@]}")
   if [[ -n $T_PROJECT && $T_PROJECT != cwd ]]; then mine+=("$T_PROJECT"); fi
@@ -259,8 +261,7 @@ conf_check_isolation() {
     for w in "${mine[@]}"; do
       rw=$(readlink -m -- "$w")
       if [[ $rw == "$rp" || $rw == "$rp"/* || $rp == "$rw"/* ]]; then
-        echo "tools.conf [$want]: '$w' would expose the data of [$owner] ($path) — refusing; a tool may only see its own data dir" >&2
-        return 1
+        echo "hint: [$want] '$(tildify "$w")' is shared with [$owner] ($(tildify "$path")): both tools see it" >&2
       fi
     done
   done < <(conf_data_paths "$file")

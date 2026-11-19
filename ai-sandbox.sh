@@ -36,6 +36,7 @@ case $HERE in
 esac
 # shellcheck source=lib.sh
 source "$LIB/lib.sh"
+CONF_HINTS=0   # "shared with [x]" hints: add/sync show them, not every start
 
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/ai-sandbox"
 
@@ -138,6 +139,36 @@ if [[ -n $VIA ]]; then
 fi
 
 [[ $T_EXEC == /* ]] || die "[$NAME] exec must be an absolute path or start with ~/"
+
+# runs = B C ...: this tool starts those sandboxed tools (vscode -> copilot,
+# a CLI -> a GUI app). They run inside THIS sandbox (see section 3), so it
+# also gets their files, env and exec rules, and the GUI parts (Wayland, GPU)
+# if one of them is a gui tool. All of it goes through the same checks below.
+RUNS_GUI=0
+for b in "${T_RUNS[@]}"; do
+  [[ $b != "$NAME" ]] || continue
+  if ! got=$(conf_load "$CONF/tools.conf" "$b" 2>/dev/null && {
+        printf 'type\t%s\n' "$T_TYPE"
+        for x in "${T_RW[@]}";        do printf 'rw\t%s\n' "$x"; done
+        for x in "${T_RWFILE[@]}";    do printf 'rw-file\t%s\n' "$x"; done
+        for x in "${T_RO[@]}";        do printf 'ro\t%s\n' "$x"; done
+        for x in "${T_ENVSET[@]}";    do printf 'env-set\t%s\n' "$x"; done
+        for x in "${T_ENVPASS[@]}";   do printf 'env-pass\t%s\n' "$x"; done
+        for x in "${T_EXECALLOW[@]}"; do printf 'exec-allow\t%s\n' "$x"; done; }); then
+    warn "[$NAME] runs = $b: no [$b] in tools.conf — ignored"; continue
+  fi
+  while IFS=$'\t' read -r k v; do
+    case $k in
+      type)       if [[ $v == gui ]]; then RUNS_GUI=1; fi ;;
+      rw)         T_RW+=("$v") ;;
+      rw-file)    T_RWFILE+=("$v") ;;
+      ro)         T_RO+=("$v") ;;
+      env-set)    T_ENVSET+=("$v") ;;
+      env-pass)   T_ENVPASS+=("$v") ;;
+      exec-allow) T_EXECALLOW+=("$v") ;;
+    esac
+  done <<<"$got"
+done
 # exec-newest: run the newest version in a versions/ folder. Claude Code's
 # updater (and others like it) leaves a non-symlink launcher alone and only
 # drops new versions there, so the renamed .ai-real-<tool> link would go stale.
@@ -179,19 +210,6 @@ case "$PROJECT" in
 esac
 START="$PROJECT"
 case "$PWD/" in "$PROJECT"/*) START="$PWD" ;; esac   # stay in a subdir if we are in one
-
-# conf_check_isolation only sees a FIXED project; a cwd project is known only
-# now. Same rule: it may not be, contain or sit inside another tool's data
-# (e.g. `cd ~/.config/Code && claude` while [code] has rw = ~/.config/Code).
-if [[ -f $CONF/tools.conf ]]; then
-  while IFS=$'\t' read -r owner path; do
-    [[ $owner == "$NAME" ]] && continue
-    rp=$(readlink -m -- "$path")
-    if [[ $PROJECT == "$rp" || $PROJECT == "$rp"/* || $rp == "$PROJECT"/* ]]; then
-      die "[$NAME] project '$PROJECT' would expose the data of [$owner] ($path) — refusing; a tool may only see its own data dir"
-    fi
-  done < <(conf_data_paths "$CONF/tools.conf")
-fi
 
 # --- never let a writable path expose the sandbox's own files ---------------
 # (otherwise the tool could rewrite its rules, wrappers or your shell rc)
@@ -287,11 +305,11 @@ for f in "${T_RWFILE[@]}"; do bind_file "$f"; done
 # The OTHER sandboxed tools in your tools.conf: their real programs, read-only,
 # under their original names. A tool that runs another one (claude -> copilot)
 # then just runs the original program, inside THIS sandbox: no second box,
-# and it gets this tool's walls, never more. It does NOT get its own data
-# dirs (per-tool isolation), so it may have to log in or use env (GH_TOKEN...).
+# and it gets this tool's walls, never more. Its own files come along only if
+# this tool lists it in `runs =`; else it may have to log in (or use GH_TOKEN...).
 # A script in your home (e.g. an npm package's index.js) also gets its folder,
-# read-only, unless that folder is your home, a secret, the project or any
-# tool's data.
+# read-only, unless that folder is your home, a secret, the project or one of
+# this tool's writable paths. Their data: only with `runs = <tool>` (section 1).
 other_programs() {   # -> "real<TAB>exec<TAB>wrapped<TAB>dir" per program
   local n j e r d
   for n in $(conf_tools "$CONF/tools.conf"); do
@@ -313,11 +331,12 @@ overlaps() {   # overlaps A B -> A is, contains or sits inside B
   [[ $a == "$b" || $a == "$b"/* || $b == "$a"/* ]]
 }
 dir_ok() {     # dir_ok DIR -> safe to show read-only
-  local d=$1 o p
+  local d=$1 p
   [[ $(readlink -m -- "$d") != "$(readlink -m -- "$HOME")" ]] || return 1
   if touches_secret "$d" >/dev/null; then return 1; fi
   if overlaps "$d" "$PROJECT"; then return 1; fi
-  while IFS=$'\t' read -r o p; do if overlaps "$d" "$p"; then return 1; fi; done < <(conf_data_paths "$CONF/tools.conf")
+  # a read-only mount over one of this tool's writable paths would break it
+  for p in "${T_RW[@]}" "${T_RWFILE[@]}"; do if overlaps "$d" "$p"; then return 1; fi; done
   return 0
 }
 OTHER=() ALSO=()
@@ -371,13 +390,18 @@ done
 for kv in "${T_ENVSET[@]}"; do add --setenv "${kv%%=*}" "${kv#*=}"; done
 pass_env "${T_ENVPASS[@]}"
 
-if [[ $T_TYPE == gui ]]; then
+if [[ $T_TYPE != gui && $RUNS_GUI == 1 && -z ${WAYLAND_DISPLAY:-} ]]; then
+  warn "[$NAME] runs a gui tool, but there is no Wayland session: its windows won't open"
+  RUNS_GUI=0
+fi
+if [[ $T_TYPE == gui || $RUNS_GUI == 1 ]]; then
   [[ -n ${WAYLAND_DISPLAY:-} ]] || die "[$NAME] is a gui tool and needs a Wayland session"
   # One shared runtime dir + /tmp per app, so a 2nd launch (e.g. the browser
   # login callback) finds the running window instead of fighting over locks.
   SHARED="$RT/ai-sandbox/$NAME"
   act_mkdir "$SHARED/run" 700; act_mkdir "$SHARED/tmp" 700; chmod 700 "$RT/ai-sandbox" "$SHARED"
-  add --bind "$SHARED/tmp" /tmp
+  # a CLI that only RUNS a gui tool keeps its own fresh /tmp
+  if [[ $T_TYPE == gui ]]; then add --bind "$SHARED/tmp" /tmp; fi
   add --bind "$SHARED/run" "$RT"
   # Wayland only. No X11 on purpose: any X client can read the keystrokes
   # and screen of every other X window.

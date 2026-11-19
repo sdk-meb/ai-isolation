@@ -149,6 +149,15 @@ exec $3 run $via$1 "\$@"
 EOF
 }
 
+# sudo_first  ->  get sudo NOW (before anything is changed), with a retry
+# after a wrong password; false = no sudo, change nothing
+sudo_first() {
+  while :; do
+    if sudo -v; then return 0; fi
+    ask_yn "sudo failed (wrong password?). Try again?" y || return 1
+  done
+}
+
 # priv_for DIR MODE  ->  sets PRIV=() if DIR is writable, PRIV=(sudo) if not
 # (never sudo in quiet mode: that runs at every shell start)
 priv_for() {
@@ -156,7 +165,7 @@ priv_for() {
   [[ -w $1 ]] && return 0
   if [[ $2 == quiet ]] || ! command -v sudo >/dev/null; then return 1; fi
   echo "note:       $1 is not writable by you, using sudo"
-  sudo -v 2>/dev/null || return 1                       # password now, or give up cleanly
+  sudo -v || return 1                                   # password now, or give up cleanly
   PRIV=(sudo)
 }
 
@@ -297,6 +306,7 @@ cmd_verify() {       # quick check, run by shell-hook.sh at every shell start
   [[ -f $TOOLS ]] || return 0
   run=$(runner) || return 0
   local mode=ask; [[ $quiet == -q ]] && mode=quiet
+  if [[ $quiet == -q ]]; then local CONF_HINTS=0; fi   # no hints at every shell start
   _verify_one() {
     wrap_original "$1" "$2" "$3" "$run" "$mode" "${4:-}"
     if [[ -n $T_EXECNEWEST && -z ${4:-} ]]; then follow_newest "$1" "$3" "$T_EXECNEWEST" "$mode"; fi
@@ -499,7 +509,7 @@ home_candidates() {
 # rate_path PATH NAME...  ->  sets R_KIND (dir|file|link?) R_SCORE (0-5)
 #   R_WHY (one-line hint) R_DEF (w|r|f|n suggested) R_LOCK (non-empty = can't add)
 rate_path() {
-  local p=$1 base loc exact=no n o owner op rp
+  local p=$1 base loc exact=no n o owner op rp shared=""
   shift
   R_LOCK="" R_DEF=n R_SCORE=0
   if   [[ -d $p ]]; then R_KIND=dir
@@ -507,8 +517,8 @@ rate_path() {
   elif [[ -e $p || -L $p ]]; then R_KIND=other
   else R_KIND=missing; fi
 
-  # never allowed: a known secret, or another tool's data (checked first, so
-  # a path that doesn't exist yet is refused too)
+  # never allowed: a known secret (checked first, so a path that doesn't
+  # exist yet is refused too). Another tool's data is allowed (shared), with a hint.
   if o=$(touches_secret "$p"); then
     R_SCORE=0 R_LOCK=x R_WHY="SECRET ($(tildify "$o")) - never visible inside"; return 0
   fi
@@ -516,11 +526,11 @@ rate_path() {
   while IFS=$'\t' read -r owner op; do
     op=$(readlink -m -- "$op")
     if [[ $rp == "$op" || $rp == "$op"/* || $op == "$rp"/* ]]; then
-      R_SCORE=0 R_LOCK=x R_WHY="data of [$owner] - a tool may only see its own"; return 0
+      [[ " $shared " == *" [$owner] "* ]] || shared+=" [$owner]"
     fi
   done < <(conf_data_paths "$TOOLS")
   case $R_KIND in
-    missing) R_WHY="does not exist yet"; R_LOCK=missing; return 0 ;;
+    missing) R_WHY="does not exist yet${shared:+ - hint: SHARED with$shared}"; R_LOCK=missing; return 0 ;;
     other)   R_WHY="dangling symlink or special file"; R_LOCK=x; return 0 ;;
   esac
 
@@ -540,6 +550,7 @@ rate_path() {
   if [[ $exact == no ]]; then
     R_SCORE=1 R_WHY="name only CONTAINS it: probably another program - check"
     [[ $loc == cache ]] && R_SCORE=0
+    if [[ -n $shared ]]; then R_WHY+=" - hint: SHARED with${shared}, both will see it"; fi
     return 0
   fi
   case $loc/$R_KIND in
@@ -555,6 +566,7 @@ rate_path() {
     cache/*)             R_SCORE=2 R_DEF=n R_WHY="cache: optional, rebuilt each run if skipped" ;;
   esac
   [[ $R_KIND == file && $R_DEF == w ]] && R_DEF=f
+  if [[ -n $shared ]]; then R_WHY+=" - hint: SHARED with${shared}, both will see it"; fi
   return 0
 }
 
@@ -780,6 +792,22 @@ cmd_add() {
   args=$(ask "Extra program arguments ('-' = none)" "$args_def")
   envs=$(ask "Env variables to pass in, e.g. API keys ('-' = none)" "-")
   if ask_yn "Ask before it runs unknown programs (aisup)?" n; then aisup=yes; fi
+  # other sandboxed tools it starts (vscode -> copilot, a CLI -> a GUI app):
+  # they run inside its sandbox, which then also gets their files
+  local runs="-" others b ok
+  others=$(conf_tools "$TOOLS" | grep -vx -e "$name" -e shell | tr '\n' ' ') || true
+  if [[ -n ${others// /} ]]; then
+    echo "Your other sandboxed tools: $others"
+    while :; do
+      runs=$(ask "Tools it may run, with their files ('-' = none)" "-")
+      [[ $runs == - ]] && break
+      runs=${runs//,/ } ok=yes
+      for b in $runs; do
+        if [[ " $others " != *" $b "* ]]; then echo "  no [$b] in $TOOLS"; ok=no; fi
+      done
+      [[ $ok == no ]] || break
+    done
+  fi
   if [[ $type == gui ]]; then                              # app's own helpers
     for r in "${reals[@]}"; do
       [[ $r != "$HOME"/* ]] || continue
@@ -807,23 +835,40 @@ cmd_add() {
     [[ $args == - ]] || printf 'args = %s\n' "$args"
     [[ $envs == - ]] || printf 'env-pass = %s\n' "$envs"
     for x in "${allow[@]}";  do printf 'exec-allow = %s\n' "$x"; done
+    [[ $runs == - ]] || printf 'runs = %s\n' "$runs"
     printf 'aisup = %s\n' "$aisup"
   )
   echo
   echo "This will be added to $TOOLS:"
   echo "$section"
   echo
-  # same checks as at every start (incl. "a tool may only see its own data dir")
+  # same checks as at every start; shared files only give a hint
   local tmp; tmp=$(mktemp)
   { cat "$TOOLS"; printf '%s\n' "$section"; } > "$tmp"
   if ! conf_load "$tmp" "$name"; then rm -f "$tmp"; die "[$name] refused (see above) — nothing saved"; fi
   rm -f "$tmp"
   ask_yn "Save?" y || { echo "nothing saved"; return 0; }
+  # a folder you can't write needs sudo for the move: ask for it BEFORE
+  # saving, so a wrong password leaves nothing half done
+  local need_sudo=no
+  for x in "${exes[@]}"; do if [[ ! -w $(dirname "$x") ]]; then need_sudo=yes; fi; done
+  if [[ $need_sudo == yes ]]; then
+    echo "sudo is needed to move the program(s):"
+    sudo_first || { echo "no sudo — nothing saved, nothing moved"; return 1; }
+  fi
   act_write "$TOOLS" keep < <(cat "$TOOLS"; printf '%s\n' "$section")
   for i in "${!exes[@]}"; do
     if (( i == 0 )); then wrap_original "$name" "${exes[i]}" "${pres[i]}" "$(runner)" yes
     else wrap_original "$name" "${exes[i]}" "${pres[i]}" "$(runner)" yes extra; fi
   done
+  # say what really happened (a move can still fail, e.g. sudo timed out)
+  local -a bad=()
+  for x in "${exes[@]}"; do is_wrapper "$x" || bad+=("$x"); done
+  if (( ${#bad[@]} )); then
+    warn "[$name] saved in $TOOLS, but NOT wrapped yet: ${bad[*]} still run(s) UNSANDBOXED"
+    warn "        finish it with:  ai-sandbox-admin sync     (or undo: ai-sandbox-admin remove $name)"
+    return 1
+  fi
   echo "Done. ${exes[*]} now start(s) sandboxed, from anywhere."
 }
 
