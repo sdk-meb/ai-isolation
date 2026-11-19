@@ -43,6 +43,7 @@ t "git works"                    'git --version'
 t "own PID namespace"            'test "$(cat /proc/1/comm)" = bwrap'
 t "host processes invisible"     'test "$(ls /proc | grep -c "^[0-9]")" -lt 10'
 t "cannot become root"           '! sudo -n true'
+t "no sandbox in the sandbox"    'test -d /run/.ai-sandbox && test "$AI_SANDBOX" = shell'
 
 # --- network is on (the tools need their API) ---
 t "DNS works"                    'getent hosts api.anthropic.com'

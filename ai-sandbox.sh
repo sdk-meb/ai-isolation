@@ -39,6 +39,56 @@ source "$LIB/lib.sh"
 
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/ai-sandbox"
 
+# =============================================================================
+# 0. Already inside a sandbox? Then don't build another one.
+# =============================================================================
+# A sandboxed tool may call another sandboxed tool (e.g. claude runs `cursor`,
+# whose wrapper in /usr/bin is visible inside). The caller is already behind
+# the walls, so run the real program right here, in the CURRENT sandbox: it
+# gets the caller's walls (never more than that), not its own tools.conf entry
+# (which is invisible in here anyway). No second bwrap, no nested namespaces.
+#
+# "Inside" = the marker dir that only this launcher creates (/run is root-owned
+# on the host, so nobody can fake it there) AND pid 1 is bwrap. An env var
+# alone would not do: anything could set it on the host to skip the sandbox.
+inside_sandbox() {
+  [[ -d /run/.ai-sandbox && $(cat /proc/1/comm 2>/dev/null) == bwrap ]]
+}
+# real_of_wrapper FILE NAME  ->  the "Real program:" line of FILE, if FILE is
+# a wrapper that runs NAME
+real_of_wrapper() {
+  local w=$1 name=$2 line
+  is_wrapper "$w" || return 1
+  line=$(grep -m1 '^exec ' "$w") || return 1
+  [[ $line =~ \ run\ (--via\ \'[^\']*\'\ )?$name\ \"\$@\"$ ]] || return 1
+  sed -n 's/^# Real program: //p' "$w" | head -n1
+}
+run_nested() {   # run_nested [--via ORIG] <tool> [args...]
+  local via="" name w real="" d
+  if [[ ${1:-} == --via ]]; then via=${2:-}; shift 2 || die "usage: ai-sandbox run [--via ORIG] <tool> [args...]"; fi
+  name=${1:-}
+  [[ $name =~ ^[A-Za-z0-9_-]+$ ]] || die "usage: ai-sandbox run <tool> [args...]"
+  shift
+  local outer=${AI_SANDBOX:-another tool}
+  [[ $name != shell ]] || die "already inside the sandbox of [$outer]"
+  # the wrapper that called us: --via names it; else look for it on PATH
+  local -a cands=()
+  if [[ -n $via ]]; then cands=("$via"); else
+    IFS=: read -r -a dirs <<<"${PATH:-/usr/local/bin:/usr/bin:/bin}"
+    for d in "${dirs[@]}" /usr/local/bin /usr/bin; do cands+=("$d/$name"); done
+  fi
+  for w in "${cands[@]}"; do
+    if real=$(real_of_wrapper "$w" "$name") && [[ -n $real ]]; then break; fi
+    real=""
+  done
+  [[ -n $real ]] || die "[$name] is not available inside the sandbox of [$outer] (its wrapper isn't visible here)"
+  [[ -f $real && -x $real ]] && ! is_wrapper "$real" \
+    || die "[$name] is not available inside the sandbox of [$outer] (real program $real isn't visible here)"
+  if [[ ${AI_DEBUG:-0} == 1 ]]; then echo "ai-sandbox: inside [$outer], running $real directly" >&2; fi
+  exec "$real" "$@"
+}
+if [[ ${1:-} == run ]] && inside_sandbox; then shift; run_nested "$@"; fi
+
 # Log what this run creates on the host (folders/files it binds), so
 # ai-sandbox-undo can remove them again. Nothing is logged if nothing is new.
 act_begin "ai-sandbox $*"
@@ -205,6 +255,9 @@ add --ro-bind-try /run/systemd/resolve /run/systemd/resolve   # DNS
 add --ro-bind-try /run/NetworkManager /run/NetworkManager
 
 add --proc /proc --dev /dev --tmpfs /dev/shm --tmpfs /tmp
+# marker: "this is an ai-sandbox" (see section 0); a nested wrapper call then
+# runs the real program here instead of building a sandbox in the sandbox
+add --dir /run/.ai-sandbox
 
 # Empty home: only what is bound below exists. Never visible: ~/.ssh,
 # ~/.gnupg, ~/.aws, browser profiles, shell history, other tools' tokens,
@@ -221,6 +274,7 @@ add --clearenv
 add --setenv HOME "$HOME" --setenv USER "$ME" --setenv LOGNAME "$ME"
 add --setenv PATH "$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 add --setenv SHELL /bin/bash
+add --setenv AI_SANDBOX "$NAME"                 # informational only, never trusted
 pass_env TERM COLORTERM LANG LANGUAGE LC_ALL EDITOR VISUAL
 
 # =============================================================================
@@ -230,6 +284,70 @@ for d in "${T_RO[@]}";     do add --ro-bind-try "$d" "$d"; done
 for d in "${T_RW[@]}";     do bind_dir "$d"; done
 for f in "${T_RWFILE[@]}"; do bind_file "$f"; done
 
+# The OTHER sandboxed tools in your tools.conf: their real programs, read-only,
+# under their original names. A tool that runs another one (claude -> copilot)
+# then just runs the original program, inside THIS sandbox: no second box,
+# and it gets this tool's walls, never more. It does NOT get its own data
+# dirs (per-tool isolation), so it may have to log in or use env (GH_TOKEN...).
+# A script in your home (e.g. an npm package's index.js) also gets its folder,
+# read-only, unless that folder is your home, a secret, the project or any
+# tool's data.
+other_programs() {   # -> "real<TAB>exec<TAB>wrapped<TAB>dir" per program
+  local n j e r d
+  for n in $(conf_tools "$CONF/tools.conf"); do
+    [[ $n != "$NAME" ]] || continue
+    ( conf_load "$CONF/tools.conf" "$n" 2>/dev/null || exit 0
+      for j in "${!T_EXECS[@]}"; do
+        e=${T_EXECS[j]} r=""
+        if (( j == 0 )) && [[ -n $T_EXECNEWEST ]] && r=$(newest_of "$T_EXECNEWEST"); then r=$(readlink -f -- "$r"); fi
+        [[ -n $r ]] || r=$(readlink -f -- "$e" 2>/dev/null) || continue
+        [[ -f $r && -x $r ]] && ! is_wrapper "$r" || continue
+        d=""
+        if [[ $r == "$HOME"/* && $(head -c 2 "$r" 2>/dev/null) == '#!' ]]; then d=$(dirname "$r"); fi
+        printf '%s\t%s\t%s\t%s\n' "$r" "$e" "${T_WRAPS[j]:-}" "$d"
+      done )
+  done
+}
+overlaps() {   # overlaps A B -> A is, contains or sits inside B
+  local a b; a=$(readlink -m -- "$1"); b=$(readlink -m -- "$2")
+  [[ $a == "$b" || $a == "$b"/* || $b == "$a"/* ]]
+}
+dir_ok() {     # dir_ok DIR -> safe to show read-only
+  local d=$1 o p
+  [[ $(readlink -m -- "$d") != "$(readlink -m -- "$HOME")" ]] || return 1
+  if touches_secret "$d" >/dev/null; then return 1; fi
+  if overlaps "$d" "$PROJECT"; then return 1; fi
+  while IFS=$'\t' read -r o p; do if overlaps "$d" "$p"; then return 1; fi; done < <(conf_data_paths "$CONF/tools.conf")
+  return 0
+}
+OTHER=() ALSO=()
+while IFS= read -r l; do OTHER+=("$l"); done < <(other_programs)
+# folders first, then the programs: a later folder mount would hide a program
+# bound into it earlier (e.g. ~/.local/bin would bring back a wrapper)
+SHOWN=()
+for l in "${OTHER[@]}"; do
+  IFS=$'\t' read -r r e w d <<<"$l"
+  [[ -n $d ]] || continue
+  if dir_ok "$d"; then add --ro-bind "$d" "$d"; SHOWN+=("$d")
+  else warn "[$NAME] other tool's program $r: its folder $d can't be shown inside — it may not run there"; fi
+done
+in_shown() { local s; for s in "${SHOWN[@]}"; do if [[ $1 == "$s"/* ]]; then return 0; fi; done; return 1; }
+# a path in your (empty) home becomes a SYMLINK to the real program, as on
+# the host: npm-style scripts find their modules through their own symlink.
+# Anywhere else (e.g. /usr/bin, or inside a folder shown above, where the
+# wrapper file already exists) the real program is bound over that path.
+link_or_bind() {   # link_or_bind REAL PATH
+  if [[ $2 == "$HOME"/* ]] && ! in_shown "$2"; then add --symlink "$1" "$2"
+  else add --ro-bind "$1" "$2"; fi
+}
+for l in "${OTHER[@]}"; do
+  IFS=$'\t' read -r r e w d <<<"$l"
+  if [[ -z $d ]] || ! in_shown "$r"; then add --ro-bind "$r" "$r"; fi
+  if [[ $e != "$r" ]]; then link_or_bind "$r" "$e"; fi
+  if [[ -n $w ]]; then link_or_bind "$r" "$w"; fi
+  ALSO+=("$r" "$e" ${w:+"$w"})
+done
+
 # the program itself (read-only), also under the name it was configured with
 add --ro-bind "$REAL" "$REAL"
 if [[ $T_EXEC != "$REAL" ]]; then add --ro-bind "$REAL" "$T_EXEC"; fi
@@ -238,7 +356,6 @@ if [[ $T_EXEC != "$REAL" ]]; then add --ro-bind "$REAL" "$T_EXEC"; fi
 if [[ -n $T_WRAPPED ]]; then add --ro-bind "$REAL" "$T_WRAPPED"; fi
 # the tool's OTHER wrapped programs: same, so they can call each other
 # (e.g. a CLI script that runs the app binary next to it)
-ALSO=()
 for j in "${!T_WRAPS[@]}"; do
   [[ ${T_WRAPS[j]} != "$T_WRAPPED" ]] || continue
   r=$(readlink -f -- "${T_EXECS[j]}" 2>/dev/null) || continue
