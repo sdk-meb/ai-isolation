@@ -294,23 +294,91 @@ ensure_conf() {
   ensure_secrets_conf "$conf/secrets.conf" "$kind" 600
 }
 
-# list_tools FILE  ->  "name  type  status  exec" table (paths shown with ~)
-#   status: sandboxed | UNSANDBOXED (a wrapped program is not our wrapper) | missing
-list_tools() {
-  local n w st
-  for n in $(conf_tools "$1"); do
-    conf_load "$1" "$n" || continue
-    st=sandboxed
-    for w in "${T_WRAPS[@]}"; do
-      if is_wrapper "$w"; then continue
-      elif [[ -e $w || -L $w ]]; then st=UNSANDBOXED; break
-      else st=missing; fi
-    done
-    (( ${#T_WRAPS[@]} )) || st=UNSANDBOXED
-    ( HOME='~'; conf_load "$1" "$n" || exit 0
-      more=""; (( ${#T_EXECS[@]} < 2 )) || more="  (+$(( ${#T_EXECS[@]} - 1 )) more)"
-      printf '  %-12s %-4s %-11s %s%s\n' "$n" "$T_TYPE" "$st" "$T_EXEC" "$more" ) || true
+# tool_status  ->  status of the tool conf_load just loaded (real paths):
+#   boxed       every program is our wrapper, real program in place
+#   not-synced  in tools.conf, but a program is not wrapped yet: runs UNSANDBOXED
+#   replaced    an update wrote a new program over the wrapper: runs UNSANDBOXED
+#               until the next shell start (hook) or `ai-sandbox-admin list`
+#   orphan      wrapper still there, real program gone (package removed?)
+#   missing     neither the program nor the real one exists
+tool_status() {
+  local i w pre st=boxed rank=0 r s
+  (( ${#T_WRAPS[@]} )) || { echo not-synced; return; }
+  for i in "${!T_WRAPS[@]}"; do
+    w=${T_WRAPS[i]} pre=${T_EXECS[i]}
+    if is_wrapper "$w"; then
+      if [[ -e $pre || -L $pre ]]; then continue; fi
+      r=5 s=orphan
+    elif [[ -e $w || -L $w ]]; then
+      if [[ -e $pre || -L $pre ]]; then r=4 s=replaced; else r=3 s=not-synced; fi
+    elif [[ -e $pre || -L $pre ]]; then r=3 s=not-synced      # wrapper deleted
+    else r=2 s=missing; fi
+    if (( r > rank )); then rank=$r st=$s; fi
   done
+  echo "$st"
+}
+
+# removed_tools  ->  "NAME<TAB>RUN" for every `ai-sandbox-admin remove NAME`
+# in the action log that is not undone (newest first)
+removed_tools() {
+  local log; log=$(act_state_dir)/actions.log
+  [[ -f $log ]] || return 0
+  awk -F'\t' '
+    $1 == "RUN"  { if ($5 ~ /^ai-sandbox-admin remove [A-Za-z0-9_-]+ *$/) { split($5, a, " "); name[$2] = a[3]; order[++n] = $2 }; next }
+    $1 == "UNDO" { undone[$2]++; next }
+                 { changes[$1]++ }
+    END { for (i = n; i >= 1; i--) { r = order[i]
+            if (changes[r] > undone[r] && !(name[r] in seen)) { seen[name[r]] = 1; print name[r] "\t" r } } }
+  ' "$log"
+}
+
+# _show PATH -> PATH with your home shown as ~ (display only)
+_show() { if [[ $1 == "$HOME"/* ]]; then printf '~/%s' "${1#"$HOME"/}"; else tildify "$1"; fi; }
+
+# list_tools FILE  ->  every tool with its status and what it may see;
+#   sets LIST_TODO = number of tools that `sync` can fix (not-synced/replaced)
+list_tools() {
+  local n st w more r name run pad="                                    "
+  local -A seen=() used=()
+  LIST_TODO=0
+  printf '  %-12s %-4s %-11s %s\n' TOOL TYPE STATUS PROGRAM
+  for n in $(conf_tools "$1"); do
+    seen[$n]=1
+    conf_load "$1" "$n" || { printf '  %-12s %-4s %-11s %s\n' "$n" - broken "fix [$n] in $(_show "$1")"; used[broken]=1; continue; }
+    st=$(tool_status); used[$st]=1
+    [[ $st != not-synced && $st != replaced ]] || LIST_TODO=$((LIST_TODO + 1))
+    w=${T_WRAPPED:-${T_EXEC:-?}}
+    more=""; (( ${#T_WRAPS[@]} < 2 )) || more="  (+$(( ${#T_WRAPS[@]} - 1 )) more)"
+    printf '  %-12s %-4s %-11s %s%s\n' "$n" "$T_TYPE" "$st" "$(_show "$w")" "$more"
+    # what it may see (paths shown with ~)
+    local -a see=("project $(_show "$T_PROJECT")")
+    for r in "${T_RW[@]}";     do see+=("rw $(_show "$r")"); done
+    for r in "${T_RWFILE[@]}"; do see+=("rw-file $(_show "$r")"); done
+    for r in "${T_RO[@]}";     do see+=("ro $(_show "$r")"); done
+    (( ${#T_RUNS[@]} )) && see+=("runs ${T_RUNS[*]}")
+    [[ $T_AISUP != yes ]] || see+=("aisup")
+    local line="" x
+    for x in "${see[@]}"; do
+      if (( ${#line} + ${#x} > 60 )) && [[ -n $line ]]; then printf '  %.30s%s\n' "$pad" "$line"; line=""; fi
+      line+="${line:+ · }$x"
+    done
+    [[ -z $line ]] || printf '  %.30s%s\n' "$pad" "$line"
+  done
+  while IFS=$'\t' read -r name run; do
+    [[ -n $name && -z ${seen[$name]:-} ]] || continue
+    printf '  %-12s %-4s %-11s %s\n' "$name" - removed "back with:  ai-sandbox-undo $run"; used[removed]=1
+  done < <(removed_tools)
+
+  # legend: only the statuses shown
+  echo
+  [[ -z ${used[boxed]:-} ]]      || echo "  boxed       sandboxed: every caller gets the sandbox"
+  [[ -z ${used[not-synced]:-} ]] || echo "  not-synced  in tools.conf but not wrapped yet: runs UNSANDBOXED"
+  [[ -z ${used[replaced]:-} ]]   || echo "  replaced    an update put a new program over the wrapper: runs UNSANDBOXED"
+  [[ -z ${used[orphan]:-} ]]     || echo "  orphan      real program gone (package removed?): ai-sandbox-admin remove <tool>"
+  [[ -z ${used[missing]:-} ]]    || echo "  missing     the program is not installed"
+  [[ -z ${used[removed]:-} ]]    || echo "  removed     taken out with 'ai-sandbox-admin remove' (its data is kept)"
+  [[ -z ${used[broken]:-} ]]     || echo "  broken      syntax error in tools.conf"
+  return 0
 }
 
 # =============================================================================

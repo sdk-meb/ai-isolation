@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ai-sandbox-admin — install the AI sandbox and manage YOUR sandboxed AI tools
+# ai-sandbox-admin — manage YOUR sandboxed AI tools
 #
-#   install          install the programs:
-#                      as root (preferred) -> /usr/local, root-owned
-#                      as a normal user    -> ~/.local
+# Installed by:  bash install.sh   (in the source folder; as root preferred
+#                -> /usr/local, root-owned; as a normal user -> ~/.local)
+#
 #   uninstall        remove the programs (as root: system; as user: yours)
 #
 #   --- as your normal user; config: ~/.config/ai-sandbox/ ---
 #   add [name]       interactive: search, pick, answer a few questions
 #   remove <name>    take a tool out of the sandbox (its data is kept)
 #   remove --all     put every real program back (config kept)
-#   list             your tools and whether they are really sandboxed; first
-#                    (re-)wraps what tools.conf lists (asks before a first
-#                    rename) — run it after editing tools.conf by hand
+#   list             every tool, what it may see, and its status (boxed,
+#                    not-synced, replaced, orphan, missing, removed); then
+#                    offers to wrap what isn't — run it after editing tools.conf
 #   check            test the sandbox walls from the current directory
 #
 # Tools replaced by an update are re-wrapped at every shell start (shell hook).
@@ -322,7 +322,7 @@ cmd_verify() {       # quick check, run by shell-hook.sh at every shell start
 cmd_sync() {
   need_user
   local run name i
-  run=$(runner) || die "not installed yet: run 'ai-sandbox-admin install' (as root preferred)"
+  run=$(runner) || die "not installed yet: run  bash install.sh  in the source folder (as root preferred)"
   ensure_conf "$CONF" "$(installed_lib)"
   legacy_cleanup
 
@@ -337,25 +337,36 @@ cmd_sync() {
     if (( ${#T_DESKTOP[@]} )); then
       warn "[$name] 'desktop =' is ignored now: launchers run $T_WRAPPED, which is the wrapper"
     fi
-    wrap_original "$name" "$T_WRAPPED" "$T_EXEC" "$run" ask
+    local mode=${SYNC_MODE:-ask}    # yes = already confirmed (list)
+    wrap_original "$name" "$T_WRAPPED" "$T_EXEC" "$run" "$mode"
     for i in "${!T_WRAPS[@]}"; do
-      (( i == 0 )) || wrap_original "$name" "${T_WRAPS[i]}" "${T_EXECS[i]}" "$run" ask extra
+      (( i == 0 )) || wrap_original "$name" "${T_WRAPS[i]}" "${T_EXECS[i]}" "$run" "$mode" extra
     done
-    if [[ -n $T_EXECNEWEST ]]; then follow_newest "$name" "$T_EXEC" "$T_EXECNEWEST" ask; fi
+    if [[ -n $T_EXECNEWEST ]]; then follow_newest "$name" "$T_EXEC" "$T_EXECNEWEST" "$mode"; fi
   done
 }
 
 cmd_list() {
-  # as your user: first make reality match tools.conf (wrap / re-wrap)
-  if (( EUID != 0 )) && runner >/dev/null; then OK_QUIET=1 cmd_sync; fi
+  # first use after a root install: create your config from the defaults
+  if (( EUID != 0 )) && runner >/dev/null; then ensure_conf "$CONF" "$(installed_lib)"; fi
   [[ -f $TOOLS ]] || { echo "no tools yet ($TOOLS): ai-sandbox-admin add"; return 0; }
-  printf '  %-12s %-4s %-11s %s\n' TOOL TYPE STATUS PROGRAM
+  echo "Config:  $(_show "$TOOLS")   (also policy.conf, secrets.conf there)"
+  echo
   list_tools "$TOOLS"
+  # offer to fix what can be fixed (as your user, once installed)
+  (( LIST_TODO )) || return 0
+  if (( EUID == 0 )) || ! runner >/dev/null; then return 0; fi
+  echo
+  if ask_yn "Wrap the $LIST_TODO not-synced/replaced tool(s) now?" y; then
+    echo; SYNC_MODE=yes OK_QUIET=1 cmd_sync
+  else
+    echo "Nothing changed. They still run UNSANDBOXED."
+  fi
 }
 
 cmd_check() {
   local run
-  run=$(runner) || die "not installed yet: run 'ai-sandbox-admin install'"
+  run=$(runner) || die "not installed yet: run  bash install.sh  in the source folder"
   AI_SANDBOX_BIN=$run exec bash "$(installed_lib)/check.sh"
 }
 
@@ -400,8 +411,10 @@ pick_mode() {
   fi
 }
 
+# Only from the SOURCE folder: install.sh runs `ai-sandbox-admin.sh install`.
+# The installed copy can't install itself (it has nothing newer to copy).
 cmd_install() {
-  [[ -f $SRC/ai-sandbox.sh ]] || die "run install from the source folder (bash install.sh)"
+  [[ -f $SRC/ai-sandbox.sh ]] || die "install from the source folder:  bash install.sh"
   command -v bwrap >/dev/null || die "install bubblewrap first (as root: apt install bubblewrap)"
   local f rc
   pick_mode
@@ -667,7 +680,7 @@ pick_home_paths() {
 
 cmd_add() {
   need_user
-  runner >/dev/null || die "not installed yet: run 'ai-sandbox-admin install' (as root preferred)"
+  runner >/dev/null || die "not installed yet: run  bash install.sh  in the source folder (as root preferred)"
   ensure_conf "$CONF" "$(installed_lib)"
   local q=${1:-}
   if [[ -z $q ]]; then printf 'AI tool to search for (e.g. claude, cursor, aider): ' >/dev/tty; tty_read q; fi
@@ -914,7 +927,7 @@ cmd_remove() {
 # -----------------------------------------------------------------------------
 act_begin "ai-sandbox-admin $*"
 case "${1:-}" in
-  install)   cmd_install ;;
+  install)   cmd_install ;;   # internal: what install.sh runs (source folder only)
   uninstall) cmd_uninstall ;;
   add)       shift; cmd_add "${1:-}" ;;
   remove)    shift; cmd_remove "${1:-}" ;;

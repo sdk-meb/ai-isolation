@@ -470,7 +470,7 @@ FULL=("$BWRAP" "${ARGS[@]}" "${CMD[@]}")
 USE_AISUP=0
 if [[ ${AISUP:-0} == 1 || $T_AISUP == yes ]]; then
   USE_AISUP=1
-  [[ -x $LIB/aisup ]] || die "aisup is not installed (apt install libseccomp-dev gcc, then ai-sandbox-admin install again)"
+  [[ -x $LIB/aisup ]] || die "aisup is not installed (apt install libseccomp-dev gcc, then bash install.sh again)"
   act_mkdir "$HOME/.local/state"                # aisup writes its log here
 fi
 # Rules for this run = "the tool may start itself" + your policy.conf.

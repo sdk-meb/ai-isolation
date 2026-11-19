@@ -55,7 +55,7 @@ This folder is the source. `install` copies the programs from it.
 | `lib.sh`, `check.sh`, `shell-hook.sh` | `/usr/local/lib/ai-sandbox/` | `~/.local/lib/ai-sandbox/` | Config parser, wall tests, re-wrap-after-update hook. |
 | `aisup.c` | `/usr/local/lib/ai-sandbox/aisup` | `~/.local/lib/ai-sandbox/aisup` | seccomp exec supervisor. Compiled if `libseccomp-dev` + `cc` are present. |
 | `tools.conf`, `policy.conf` | `/usr/local/lib/ai-sandbox/` | `~/.local/lib/ai-sandbox/` | **Defaults**, copied into each user's config on first use. |
-| `install.sh` / `uninstall.sh` | — | — | Shortcuts for `ai-sandbox-admin install` / `uninstall`. |
+| `install.sh` / `uninstall.sh` | — | — | `install.sh` installs (see above; it runs the source copy of `ai-sandbox-admin`). `uninstall.sh` is a shortcut for `ai-sandbox-admin uninstall`. |
 | `Makefile` | — | — | Builds `./aisup` locally, for development only. |
 
 Per user, always in your home:
@@ -136,12 +136,11 @@ That is its only job. Everything else is in `ai-sandbox-admin`.
 
 | Command | Run as | What it does |
 |---|---|---|
-| `install` | root (preferred) or user | Install the programs (see above). |
 | `uninstall` | root → system install; user → user install | Remove the programs. A user uninstall also runs `remove --all` and asks before deleting `~/.config/ai-sandbox`. Before a root uninstall, users should run `remove --all`. |
 | `add [name]` | you | Interactive add (see below). |
 | `remove <name>` | you | Put the real program back (and remove a dpkg diversion), then delete the tool's section. Logged, so `ai-sandbox-undo last` brings it back. Its data is kept. |
 | `remove --all` | you | Put every real program back. The config is kept. |
-| `list` | you | First makes reality match `tools.conf`: wraps every tool (asks before each first move; sudo for root-owned folders), re-wraps what an update replaced, points `exec-newest` tools at their newest version. Then shows each tool as `sandboxed`, `UNSANDBOXED` or `missing`. Run it after editing `tools.conf` by hand. |
+| `list` | you | Shows every tool, what it may see (project, `rw`, `ro`, `runs`, aisup) and its status: `boxed` (sandboxed), `not-synced` (in `tools.conf`, not wrapped yet: runs unsandboxed), `replaced` (an update wrote over the wrapper), `orphan` (real program gone), `missing` (not installed), `removed` (taken out with `remove`; shows the `ai-sandbox-undo` id to bring it back). Then offers to wrap the `not-synced`/`replaced` ones (sudo for root-owned folders). Changes nothing unless you say yes. Run it after editing `tools.conf` by hand. |
 | `check` | you | Run the wall tests from the current directory (`AISUP=1` for the supervisor). |
 
 The shell hook does the re-wrap part of `list` silently at every shell start (never with sudo).
@@ -339,7 +338,7 @@ ai-sandbox ─► aisup (outside the sandbox, supervisor)
 | `refusing to expose '…'` | `cd` into a project folder first, or set `AI_PROJECT=`. |
 | `run this as your normal user` | `add`, `remove` and `list` manage *your* config. Leave the root shell first. |
 | `root already installed it system-wide` | No user install is needed. Just run `ai-sandbox-admin list`. |
-| `aisup is not installed` | `apt install libseccomp-dev gcc`, then run `install` again. |
+| `aisup is not installed` | `apt install libseccomp-dev gcc`, then run `bash install.sh` again. |
 | Cursor: *SUID sandbox helper … not configured* | Not needed on Debian 12: Chromium's sandbox works inside bwrap (tested). If your kernel blocks it anyway, add `--no-sandbox` to `args` in `[cursor]` and run `ai-sandbox-admin list`; bwrap is still the wall. |
 | `cursor .` opens `cli.js` as a file | Your installed `ai-sandbox` is older than the Electron CLI fix. Re-run the install. |
 | Cursor shows no window | `AI_DEBUG=1 ai-sandbox cursor` in a terminal and read the errors. |

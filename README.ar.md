@@ -55,7 +55,7 @@ ai-sandbox <tool> [args]        reads ~/.config/ai-sandbox/tools.conf
 | `lib.sh` و `check.sh` و `shell-hook.sh` | `/usr/local/lib/ai-sandbox/` | `~/.local/lib/ai-sandbox/` | محلل الإعدادات، واختبارات الجدران، وخطّاف إعادة التغليف بعد التحديث. |
 | `aisup.c` | `/usr/local/lib/ai-sandbox/aisup` | `~/.local/lib/ai-sandbox/aisup` | مشرف تنفيذ `seccomp`. يُبنى إذا توفر `libseccomp-dev` و `cc`. |
 | `tools.conf` و `policy.conf` | `/usr/local/lib/ai-sandbox/` | `~/.local/lib/ai-sandbox/` | **الافتراضيات**، تُنسخ إلى إعدادات كل مستخدم عند أول استخدام. |
-| `install.sh` / `uninstall.sh` | — | — | اختصاران لـ `ai-sandbox-admin install` / `uninstall`. |
+| `install.sh` / `uninstall.sh` | — | — | `install.sh` يثبّت (انظر أعلاه؛ يشغّل نسخة المصدر من `ai-sandbox-admin`). `uninstall.sh` اختصار لـ `ai-sandbox-admin uninstall`. |
 | `Makefile` | — | — | يبني `./aisup` محليا، للتطوير فقط. |
 
 لكل مستخدم، ودائما في مجلده الشخصي:
@@ -142,12 +142,11 @@ claude                   # معزولة
 
 | الأمر | يُشغَّل بصفة | ماذا يفعل |
 |---|---|---|
-| `install` | الجذر (المُفضَّل) أو المستخدم | يثبّت البرامج (انظر أعلاه). |
 | `uninstall` | الجذر: تثبيت النظام؛ المستخدم: تثبيت المستخدم | يزيل البرامج. تثبيت المستخدم يشغّل أيضا `remove --all` ويسأل قبل حذف `~/.config/ai-sandbox`. قبل إلغاء تثبيت الجذر، على المستخدمين تشغيل `remove --all`. |
 | `add [name]` | أنت | إضافة تفاعلية (انظر أدناه). |
 | `remove <name>` | أنت | يعيد البرنامج الحقيقي (ويزيل تحويل `dpkg`)، ثم يحذف قسم الأداة. يُسجَّل، بحيث يعيده `ai-sandbox-undo last`. تُحفظ بيانات الأداة. |
 | `remove --all` | أنت | يعيد كل البرامج الحقيقية. تُحفظ الإعدادات. |
-| `list` | أنت | يجعل الواقع مطابقا لـ `tools.conf` أولا: يغلّف كل أداة (يسأل قبل أول نقل؛ `sudo` للمجلدات المملوكة للجذر)، ويعيد تغليف ما استبدله تحديث، ويوجه أدوات `exec-newest` إلى أحدث نسخة. ثم يعرض كل أداة بحالة `sandboxed` أو `UNSANDBOXED` أو `missing`. شغّله بعد تعديل `tools.conf` يدويا. |
+| `list` | أنت | يعرض كل أداة، وما يمكنها رؤيته (المشروع و `rw` و `ro` و `runs` و aisup) وحالتها: `boxed` (معزولة)، `not-synced` (في `tools.conf` لكنها غير مغلّفة بعد: تعمل دون عزل)، `replaced` (كتب تحديث فوق الغلاف)، `orphan` (البرنامج الحقيقي غير موجود)، `missing` (غير مثبتة)، `removed` (أُخرجت بـ `remove`؛ ويعرض معرّف `ai-sandbox-undo` لإعادتها). ثم يعرض تغليف أدوات `not-synced` / `replaced` (`sudo` للمجلدات المملوكة للجذر). لا يغيّر شيئا إلا إذا وافقت. شغّله بعد تعديل `tools.conf` يدويا. |
 | `check` | أنت | يشغّل اختبارات الجدران من المجلد الحالي (`AISUP=1` للمشرف). |
 
 يقوم خطّاف الصدفة بجزء إعادة التغليف من `list` بصمت عند كل بدء صدفة (دون `sudo` أبدا).
