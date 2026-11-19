@@ -172,18 +172,22 @@ static int describe(const struct seccomp_notif *req,
     if (mem < 0) return -1;
     if (read_string(mem, path_ptr, raw, sizeof raw) < 0) goto out;
 
-    /* Relative path -> prefix with the process's cwd (or the dirfd's path). */
+    /* Relative path -> prefix with the process's cwd (or the dirfd's path).
+     * A path that doesn't fit is an error (-> deny), never truncated: a cut
+     * path could match a policy rule for a different program. */
+    int len;
     if (raw[0] == '/') {
-        snprintf(path, psize, "%s", raw);
+        len = snprintf(path, psize, "%s", raw);
     } else {
         if (dirfd == AT_FDCWD) snprintf(proc, sizeof proc, "/proc/%u/cwd", req->pid);
         else                   snprintf(proc, sizeof proc, "/proc/%u/fd/%d", req->pid, dirfd);
         ssize_t n = readlink(proc, base, sizeof base - 1);
         if (n < 0) goto out;
         base[n] = '\0';
-        if (raw[0] == '\0' && (flags & AT_EMPTY_PATH)) snprintf(path, psize, "%s", base);
-        else                                           snprintf(path, psize, "%s/%s", base, raw);
+        if (raw[0] == '\0' && (flags & AT_EMPTY_PATH)) len = snprintf(path, psize, "%s", base);
+        else                                           len = snprintf(path, psize, "%s/%s", base, raw);
     }
+    if (len < 0 || (size_t)len >= psize) goto out;
 
     /* Command line = resolved path + argv[1..] (argv[0] can be anything). */
     snprintf(cmd, csize, "%s", path);
